@@ -1,5 +1,11 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, panic_with_error, symbol_short, Address, Env, String, Symbol, Vec};
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum ContractError {
+    NoMaintenanceHistory = 1,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -70,8 +76,8 @@ impl Lifecycle {
             .storage()
             .persistent()
             .get(&history_key(asset_id))
-            .expect("no maintenance history");
-        history.last().expect("no records")
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NoMaintenanceHistory));
+        history.last().unwrap_or_else(|| panic_with_error!(&env, ContractError::NoMaintenanceHistory))
     }
 
     pub fn get_collateral_score(env: Env, asset_id: u64) -> u32 {
@@ -112,5 +118,19 @@ mod tests {
         assert_eq!(client.get_collateral_score(&1u64), 50);
         assert!(client.is_collateral_eligible(&1u64));
         assert_eq!(client.get_maintenance_history(&1u64).len(), 10);
+    }
+
+    #[test]
+    fn test_get_last_service_no_history() {
+        let env = Env::default();
+        let contract_id = env.register(Lifecycle, ());
+        let client = LifecycleClient::new(&env, &contract_id);
+        let result = client.try_get_last_service(&999u64);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::NoMaintenanceHistory as u32
+            )))
+        );
     }
 }
