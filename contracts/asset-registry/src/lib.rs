@@ -74,6 +74,13 @@ impl AssetRegistry {
         env.storage().persistent().set(&asset_key(id), &asset);
         env.storage().instance().set(&ASSET_COUNT, &id);
         env.storage().persistent().set(&dk, &id);
+        
+        // Emit asset registration event
+        env.events().publish(
+            (symbol_short!("REG_AST"), id),
+            (asset_type, owner.clone(), env.ledger().timestamp())
+        );
+        
         id
     }
 
@@ -92,7 +99,7 @@ impl AssetRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{symbol_short, testutils::Address as _, Env, String};
+    use soroban_sdk::{symbol_short, testutils::{Address as _, Events}, Env, String};
 
     #[test]
     fn test_register_and_get_asset() {
@@ -167,5 +174,23 @@ mod tests {
         let id_a = client.register_asset(&symbol_short!("GENSET"), &metadata, &owner_a);
         let id_b = client.register_asset(&symbol_short!("GENSET"), &metadata, &owner_b);
         assert_ne!(id_a, id_b);
+    }
+
+    #[test]
+    fn test_register_asset_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let asset_type = symbol_short!("GENSET");
+        let metadata = String::from_str(&env, "Caterpillar 3516 Generator");
+        
+        client.register_asset(&asset_type, &metadata, &owner);
+
+        // Verify registration event was emitted
+        let events = env.events().all();
+        assert!(events.len() > 0);
     }
 }
