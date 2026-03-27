@@ -215,6 +215,10 @@ Industrial assets like generators, turbines, and heavy vehicles represent trilli
 
 See [docs/roadmap.md](docs/roadmap.md) for details.
 
+## 🛡️ Security
+
+We take the security of Mainstay very seriously. If you discover a vulnerability, please refer to our [Security Policy](SECURITY.md) for reporting instructions.
+
 ## 🤝 Contributing
 
 We welcome contributions! Please:
