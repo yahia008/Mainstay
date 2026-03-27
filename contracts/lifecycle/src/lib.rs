@@ -644,4 +644,32 @@ mod tests {
         let score_ttl = env.storage().persistent().get_ttl(&score_key(asset_id));
         assert!(score_ttl > 0, "Score TTL should be extended");
     }
+
+    #[test]
+    fn test_ttl_extended_on_maintenance_submission() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, eng_client) = setup(&env);
+        
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+        eng_client.register_engineer(&engineer, &hash, &issuer);
+
+        let asset_id = 1u64;
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "Routine maintenance"),
+            &engineer,
+        );
+
+        // Verify TTL is set for history storage entry
+        let history_ttl = env.storage().persistent().get_ttl(&history_key(asset_id));
+        assert!(history_ttl > 0, "History TTL should be extended");
+
+        // Verify TTL is set for score storage entry
+        let score_ttl = env.storage().persistent().get_ttl(&score_key(asset_id));
+        assert!(score_ttl > 0, "Score TTL should be extended");
+    }
 }

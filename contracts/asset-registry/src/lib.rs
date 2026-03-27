@@ -27,6 +27,9 @@ pub struct Asset {
 
 const ASSET_COUNT: Symbol = symbol_short!("A_COUNT");
 
+const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
+
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -91,7 +94,45 @@ impl AssetRegistry {
     pub fn asset_count(env: Env) -> u64 {
         env.storage().instance().get(&ASSET_COUNT).unwrap_or(0)
     }
+
+    /// Initialize the admin address (call once on deploy)
+    pub fn initialize_admin(env: Env, admin: Address) {
+        admin.require_auth();
+        if env.storage().instance().has(&ADMIN_KEY) {
+            panic!("Admin already initialized");
+        }
+        env.storage().instance().set(&ADMIN_KEY, &admin);
+    }
+
+    /// Get the current admin address
+    pub fn get_admin(env: Env) -> Address {
+        env.storage().instance().get(&ADMIN_KEY).expect("Admin not initialized")
+    }
+
+    /// Admin-only: Deregister (remove) an asset
+    pub fn deregister_asset(env: Env, asset_id: u64) {
+        let admin = Self::get_admin(env.clone());
+        admin.require_auth();
+        
+        let asset: Asset = env.storage().persistent()
+            .get(&asset_key(asset_id))
+            .expect("Asset not found");
+        
+        // Remove asset storage
+        env.storage().persistent().remove(&asset_key(asset_id));
+        
+        // Remove deduplication key
+        let dk = dedup_key(&asset.owner, &env.crypto().sha256(&Bytes::from(asset.metadata.to_xdr(&env))).into());
+        env.storage().persistent().remove(&dk);
+        
+        // Emit deregistration event
+        env.events().publish(
+            (symbol_short!("DEREG_AST"), asset_id),
+            (asset.asset_type.clone(), asset.owner.clone())
+        );
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -101,6 +142,9 @@ mod tests {
         testutils::{Address as _, Events},
         Env, String,
     };
+
+    use crate::AssetRegistryClient;
+
 
     #[test]
     fn test_register_and_get_asset() {
@@ -220,3 +264,4 @@ mod tests {
         assert!(dedup_ttl > 0, "Deduplication key TTL should be extended");
     }
 }
+
