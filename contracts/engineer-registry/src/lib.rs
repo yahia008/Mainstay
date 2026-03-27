@@ -172,9 +172,9 @@ impl EngineerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, testutils::storage::Persistent, BytesN, Env, Symbol};
+    use soroban_sdk::{testutils::Address as _, testutils::storage::Persistent, BytesN, Env};
 
-    fn setup(env: &Env) -> (EngineerRegistryClient, Address) {
+    fn setup<'a>(env: &'a Env) -> (EngineerRegistryClient<'a>, Address) {
         let contract_id = env.register(EngineerRegistry, ());
         let client = EngineerRegistryClient::new(env, &contract_id);
         let admin = Address::generate(env);
@@ -272,7 +272,7 @@ mod tests {
     fn test_non_admin_cannot_upgrade() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, admin) = setup(&env);
+        let (client, _) = setup(&env);
 
         let outsider = Address::generate(&env);
         let new_wasm_hash = BytesN::from_array(&env, &[0xabu8; 32]);

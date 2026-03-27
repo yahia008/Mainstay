@@ -222,7 +222,7 @@ impl Lifecycle {
         let score: u32 = env
             .storage()
             .persistent()
-            .get(&amp;score_key(asset_id))
+            .get(&score_key(asset_id))
             .unwrap_or(0u32);
         let weight = get_task_weight(&env, &task_type);
         let new_score = (score + weight).min(100);
@@ -376,15 +376,8 @@ impl Lifecycle {
     pub fn get_maintenance_history(env: Env, asset_id: u64) -> Vec<MaintenanceRecord> {
         env.storage()
             .persistent()
-            .get(&amp;history_key(asset_id))
-            .unwrap_or(Vec::new(&amp;env));
-        let len = history.len();
-        let start = (page as usize).saturating_mul(page_size as usize);
-        if start >= len {
-            return Vec::new(&amp;env);
-        }
-        let end = (start + page_size as usize).min(len);
-        history.slice(start..end)
+            .get(&history_key(asset_id))
+            .unwrap_or(Vec::new(&env))
     }
 
     pub fn get_last_service(env: Env, asset_id: u64) -> MaintenanceRecord {
@@ -402,7 +395,7 @@ impl Lifecycle {
     pub fn get_collateral_score(env: Env, asset_id: u64) -> u32 {
         env.storage()
             .persistent()
-            .get(&amp;score_key(asset_id))
+            .get(&score_key(asset_id))
             .unwrap_or(0)
     }
 
