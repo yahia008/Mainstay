@@ -2,7 +2,7 @@
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, panic_with_error, symbol_short, Address,
-    Bytes, BytesN, Env, String, Symbol,
+    Bytes, BytesN, Env, String, Symbol, Vec,
 };
 
 #[contracterror]
@@ -46,6 +46,34 @@ fn dedup_key(owner: &Address, hash: &BytesN<32>) -> (Symbol, Address, BytesN<32>
     (symbol_short!("DEDUP"), owner.clone(), hash.clone())
 }
 
+/// Owner index key: owner → Vec<u64> of asset IDs.
+fn owner_index_key(owner: &Address) -> (Symbol, Address) {
+    (symbol_short!("OWN_IDX"), owner.clone())
+}
+
+/// Append an asset ID to the owner's index.
+fn owner_index_add(env: &Env, owner: &Address, asset_id: u64) {
+    let key = owner_index_key(owner);
+    let mut ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(env));
+    ids.push_back(asset_id);
+    env.storage().persistent().set(&key, &ids);
+    env.storage().persistent().extend_ttl(&key, 518400, 518400);
+}
+
+/// Remove an asset ID from the owner's index.
+fn owner_index_remove(env: &Env, owner: &Address, asset_id: u64) {
+    let key = owner_index_key(owner);
+    let ids: Vec<u64> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(env));
+    let mut updated: Vec<u64> = Vec::new(env);
+    for id in ids.iter() {
+        if id != asset_id {
+            updated.push_back(id);
+        }
+    }
+    env.storage().persistent().set(&key, &updated);
+    env.storage().persistent().extend_ttl(&key, 518400, 518400);
+}
+
 #[contract]
 pub struct AssetRegistry;
 
@@ -75,6 +103,9 @@ impl AssetRegistry {
         env.storage().instance().set(&ASSET_COUNT, &id);
         env.storage().persistent().set(&dk, &id);
 
+        // Update owner index
+        owner_index_add(&env, &owner, id);
+
         // Emit asset registration event
         env.events().publish(
             (symbol_short!("REG_AST"), id),
@@ -94,6 +125,14 @@ impl AssetRegistry {
     /// Returns true if an asset with the given ID exists, false otherwise.
     pub fn asset_exists(env: Env, asset_id: u64) -> bool {
         env.storage().persistent().has(&asset_key(asset_id))
+    }
+
+    /// Returns all asset IDs owned by the given address.
+    pub fn get_assets_by_owner(env: Env, owner: Address) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&owner_index_key(&owner))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     pub fn asset_count(env: Env) -> u64 {
@@ -129,7 +168,10 @@ impl AssetRegistry {
         // Remove deduplication key
         let dk = dedup_key(&asset.owner, &env.crypto().sha256(&Bytes::from(asset.metadata.to_xdr(&env))).into());
         env.storage().persistent().remove(&dk);
-        
+
+        // Remove from owner index
+        owner_index_remove(&env, &asset.owner, asset_id);
+
         // Emit deregistration event
         env.events().publish(
             (symbol_short!("DEREG_AST"), asset_id),
@@ -201,6 +243,10 @@ impl AssetRegistry {
         env.storage().persistent().remove(&dedup_key(&current_owner, &hash));
         env.storage().persistent().set(&dedup_key(&new_owner, &hash), &asset_id);
 
+        // Move owner index entry
+        owner_index_remove(&env, &current_owner, asset_id);
+        owner_index_add(&env, &new_owner, asset_id);
+
         asset.owner = new_owner.clone();
         env.storage().persistent().set(&asset_key(asset_id), &asset);
         env.storage().persistent().extend_ttl(&asset_key(asset_id), 518400, 518400);
@@ -238,7 +284,7 @@ mod tests {
     use soroban_sdk::{
         symbol_short,
         testutils::{Address as _, Events},
-        Bytes, Env, String,
+        Bytes, Env, String, Vec,
     };
     use soroban_sdk::testutils::storage::Persistent;
 
@@ -669,5 +715,89 @@ mod tests {
         let client = AssetRegistryClient::new(&env, &contract_id);
 
         assert!(!client.asset_exists(&9999u64));
+    }
+
+    #[test]
+    fn test_get_assets_by_owner_returns_registered_ids() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let id1 = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "Asset Alpha"),
+            &owner,
+        );
+        let id2 = client.register_asset(
+            &symbol_short!("TURBINE"),
+            &String::from_str(&env, "Asset Beta"),
+            &owner,
+        );
+
+        let ids = client.get_assets_by_owner(&owner);
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+    }
+
+    #[test]
+    fn test_get_assets_by_owner_returns_empty_for_unknown_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let stranger = Address::generate(&env);
+        let ids = client.get_assets_by_owner(&stranger);
+        assert_eq!(ids.len(), 0);
+    }
+
+    #[test]
+    fn test_get_assets_by_owner_updated_after_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let new_owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        client.transfer_asset(&id, &owner, &new_owner);
+
+        // Original owner should have no assets
+        assert_eq!(client.get_assets_by_owner(&owner).len(), 0);
+        // New owner should have the asset
+        let new_ids = client.get_assets_by_owner(&new_owner);
+        assert_eq!(new_ids.len(), 1);
+        assert!(new_ids.contains(&id));
+    }
+
+    #[test]
+    fn test_get_assets_by_owner_updated_after_deregister() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        let owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        assert_eq!(client.get_assets_by_owner(&owner).len(), 1);
+        client.deregister_asset(&id);
+        assert_eq!(client.get_assets_by_owner(&owner).len(), 0);
     }
 }
