@@ -11,7 +11,8 @@ pub enum ContractError {
     NoMaintenanceHistory = 1,
     UnauthorizedEngineer = 2,
     UnauthorizedAdmin = 3,
-    AssetNotFound = 4,
+    HistoryCapReached = 4,
+    AssetNotFound = 5,
 }
 
 #[contracttype]
@@ -235,7 +236,7 @@ impl Lifecycle {
             .unwrap_or(Vec::new(&env));
 
         if history.len() >= config.max_history {
-            panic!("history cap reached");
+            panic_with_error!(&env, ContractError::HistoryCapReached);
         }
 
         let timestamp = env.ledger().timestamp();
@@ -336,7 +337,7 @@ impl Lifecycle {
 
         // Validate all records fit before writing any
         if history.len() + records.len() > config.max_history {
-            panic!("history cap reached");
+            panic_with_error!(&env, ContractError::HistoryCapReached);
         }
 
         // Write all records
@@ -641,7 +642,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_history_cap_enforced() {
         let env = Env::default();
         env.mock_all_auths();
@@ -659,12 +659,17 @@ mod tests {
             );
         }
 
-        // This 4th submission should panic (cap = 3)
-        client.submit_maintenance(
+        let result = client.try_submit_maintenance(
             &asset_id,
             &symbol_short!("OIL_CHG"),
             &String::from_str(&env, "over cap"),
             &engineer,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::HistoryCapReached as u32,
+            ))),
         );
     }
 
@@ -1186,7 +1191,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "history cap reached")]
     fn test_batch_submit_exceeds_history_cap() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1209,7 +1213,13 @@ mod tests {
             notes: String::from_str(&env, "Third - over cap"),
         });
 
-        client.batch_submit_maintenance(&asset_id, &records, &engineer);
+        let result = client.try_batch_submit_maintenance(&asset_id, &records, &engineer);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::HistoryCapReached as u32,
+            ))),
+        );
     }
 
     #[test]

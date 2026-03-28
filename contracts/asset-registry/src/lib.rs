@@ -286,8 +286,8 @@ mod tests {
     use super::*;
     use soroban_sdk::{
         symbol_short,
-        testutils::{Address as _, Events},
-        Bytes, Env, String, Vec,
+        testutils::{Address as _, Events, Ledger as _},
+        Bytes, Env, String,
     };
     use soroban_sdk::testutils::storage::Persistent;
 

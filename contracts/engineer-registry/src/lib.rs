@@ -253,7 +253,7 @@ mod tests {
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
         client.add_trusted_issuer(&admin, &issuer);
-        client.register_engineer(&engineer, &hash, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
 
         let contract_id = client.address.clone();
         let ttl = env.as_contract(&contract_id, || {
