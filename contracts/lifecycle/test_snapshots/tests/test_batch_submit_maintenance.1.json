@@ -91,16 +91,74 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-              "function_name": "submit_maintenance",
+              "function_name": "batch_submit_maintenance",
               "args": [
                 {
                   "u64": 1
                 },
                 {
-                  "symbol": "OIL_CHG"
-                },
-                {
-                  "string": "Routine"
+                  "vec": [
+                    {
+                      "map": [
+                        {
+                          "key": {
+                            "symbol": "notes"
+                          },
+                          "val": {
+                            "string": "Oil change"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "task_type"
+                          },
+                          "val": {
+                            "symbol": "OIL_CHG"
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "map": [
+                        {
+                          "key": {
+                            "symbol": "notes"
+                          },
+                          "val": {
+                            "string": "Inspection"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "task_type"
+                          },
+                          "val": {
+                            "symbol": "INSPECT"
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "map": [
+                        {
+                          "key": {
+                            "symbol": "notes"
+                          },
+                          "val": {
+                            "string": "Engine repair"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "task_type"
+                          },
+                          "val": {
+                            "symbol": "ENGINE"
+                          }
+                        }
+                      ]
+                    }
+                  ]
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
@@ -111,7 +169,9 @@
           "sub_invocations": []
         }
       ]
-    ]
+    ],
+    [],
+    []
   ],
   "ledger": {
     "protocol_version": 22,
@@ -558,7 +618,7 @@
                             "symbol": "notes"
                           },
                           "val": {
-                            "string": "Routine"
+                            "string": "Oil change"
                           }
                         },
                         {
@@ -567,6 +627,94 @@
                           },
                           "val": {
                             "symbol": "OIL_CHG"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "timestamp"
+                          },
+                          "val": {
+                            "u64": 0
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "map": [
+                        {
+                          "key": {
+                            "symbol": "asset_id"
+                          },
+                          "val": {
+                            "u64": 1
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "engineer"
+                          },
+                          "val": {
+                            "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "notes"
+                          },
+                          "val": {
+                            "string": "Inspection"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "task_type"
+                          },
+                          "val": {
+                            "symbol": "INSPECT"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "timestamp"
+                          },
+                          "val": {
+                            "u64": 0
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "map": [
+                        {
+                          "key": {
+                            "symbol": "asset_id"
+                          },
+                          "val": {
+                            "u64": 1
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "engineer"
+                          },
+                          "val": {
+                            "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "notes"
+                          },
+                          "val": {
+                            "string": "Engine repair"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "task_type"
+                          },
+                          "val": {
+                            "symbol": "ENGINE"
                           }
                         },
                         {
@@ -640,72 +788,6 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "SCHIST"
-                },
-                {
-                  "u64": 1
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "SCHIST"
-                    },
-                    {
-                      "u64": 1
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "vec": [
-                    {
-                      "map": [
-                        {
-                          "key": {
-                            "symbol": "score"
-                          },
-                          "val": {
-                            "u32": 2
-                          }
-                        },
-                        {
-                          "key": {
-                            "symbol": "timestamp"
-                          },
-                          "val": {
-                            "u64": 0
-                          }
-                        }
-                      ]
-                    }
-                  ]
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          4095
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
-            "key": {
-              "vec": [
-                {
                   "symbol": "SCORE"
                 },
                 {
@@ -735,7 +817,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u32": 2
+                  "u32": 14
                 }
               }
             },
@@ -981,39 +1063,5 @@
       ]
     ]
   },
-  "events": [
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000003",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "MAINT"
-              },
-              {
-                "u64": 1
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "symbol": "OIL_CHG"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
-                },
-                {
-                  "u64": 0
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    }
-  ]
+  "events": []
 }
