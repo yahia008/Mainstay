@@ -75,6 +75,9 @@ impl EngineerRegistry {
         env.storage()
             .persistent()
             .set(&issuer_engineers_key(&issuer), &list);
+        env.storage()
+            .persistent()
+            .extend_ttl(&issuer_engineers_key(&issuer), 518400, 518400);
     }
 
     pub fn verify_engineer(env: Env, engineer: Address) -> bool {
@@ -233,6 +236,28 @@ mod tests {
             env.storage().persistent().get_ttl(&engineer_key(&engineer))
         });
         assert!(ttl > 0, "Engineer TTL should be extended");
+    }
+
+    #[test]
+    fn test_issuer_engineers_ttl_extended_on_registration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer);
+
+        let contract_id = client.address.clone();
+        let ttl = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get_ttl(&issuer_engineers_key(&issuer))
+        });
+        assert!(ttl > 0, "Issuer engineers TTL should be extended");
     }
 
     #[test]
