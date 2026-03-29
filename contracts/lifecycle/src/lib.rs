@@ -285,6 +285,9 @@ impl Lifecycle {
         env.storage()
             .persistent()
             .set(&last_update_key(asset_id), &timestamp);
+        env.storage()
+            .persistent()
+            .extend_ttl(&last_update_key(asset_id), 518400, 518400);
 
         // Emit maintenance submission event
         env.events().publish(
@@ -371,6 +374,7 @@ impl Lifecycle {
         env.storage().persistent().set(&score_key(asset_id), &score);
         env.storage().persistent().set(&score_history_key(asset_id), &score_history);
         env.storage().persistent().set(&last_update_key(asset_id), &timestamp);
+        env.storage().persistent().extend_ttl(&last_update_key(asset_id), 518400, 518400);
     }
 
     /// Apply time-based decay to an asset's collateral score.
@@ -643,7 +647,7 @@ mod tests {
     use asset_registry::{AssetRegistry, AssetRegistryClient};
     use soroban_sdk::{
         symbol_short,
-        testutils::{Address as _, Events, Ledger},
+        testutils::{storage::Persistent as _, Address as _, Events, Ledger},
         BytesN, Env, String, TryIntoVal,
     };
 
@@ -1756,5 +1760,29 @@ mod tests {
         assert_eq!(client.get_maintenance_history_page(&asset_id, &10, &2).len(), 0);
         // limit=0 → empty
         assert_eq!(client.get_maintenance_history_page(&asset_id, &0, &0).len(), 0);
+    }
+
+    // --- Issue #107: last_update_key TTL must be extended after write ---
+
+    #[test]
+    fn test_last_update_key_ttl_extended_after_submit() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "Routine oil change"),
+            &engineer,
+        );
+
+        let ttl = env.as_contract(&client.address, || {
+            env.storage().persistent().get_ttl(&last_update_key(asset_id))
+        });
+        assert!(ttl > 0, "last_update_key TTL should be extended after submit_maintenance");
     }
 }
