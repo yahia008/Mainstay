@@ -1245,6 +1245,43 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_submit_fails_atomically_on_history_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 3);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Fill to max_history - 1 = 2
+        for _ in 0..2 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, ""),
+                &engineer,
+            );
+        }
+        assert_eq!(client.get_maintenance_history(&asset_id).len(), 2);
+
+        // Batch of 2 would push total to 4, exceeding cap of 3
+        let mut records = Vec::new(&env);
+        records.push_back(BatchRecord { task_type: symbol_short!("OIL_CHG"), notes: String::from_str(&env, "") });
+        records.push_back(BatchRecord { task_type: symbol_short!("OIL_CHG"), notes: String::from_str(&env, "") });
+
+        let result = client.try_batch_submit_maintenance(&asset_id, &records, &engineer);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::HistoryCapReached as u32,
+            ))),
+        );
+
+        // No records written — history still at 2
+        assert_eq!(client.get_maintenance_history(&asset_id).len(), 2);
+    }
+
+    #[test]
     fn test_batch_submit_exceeds_history_cap() {
         let env = Env::default();
         env.mock_all_auths();
