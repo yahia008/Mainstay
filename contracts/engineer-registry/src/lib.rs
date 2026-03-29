@@ -352,6 +352,21 @@ impl EngineerRegistry {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Get the count of engineers credentialed by a specific issuer.
+    ///
+    /// # Arguments
+    /// * `issuer` - The address of the issuer to query
+    ///
+    /// # Returns
+    /// The number of engineers credentialed by the given issuer as u32
+    pub fn get_engineer_count_by_issuer(env: Env, issuer: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&issuer_engineers_key(&issuer))
+            .map(|v: Vec<Address>| v.len() as u32)
+            .unwrap_or(0u32)
+    }
+
     /// Admin-only function to upgrade the contract WASM to a new hash.
     /// This allows for contract updates while maintaining state.
     ///
@@ -362,7 +377,7 @@ impl EngineerRegistry {
     /// # Panics
     /// - [`ContractError::NotInitialized`] if the admin has not been initialized
     /// - [`ContractError::UnauthorizedAdmin`] if caller is not the admin
-    pub fn upgrade(env: Env, admin: Address, _new_wasm_hash: BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         ensure_not_paused(&env);
         admin.require_auth();
 
@@ -375,9 +390,14 @@ impl EngineerRegistry {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
 
+        env.events().publish(
+            (symbol_short!("UPGRADE"), admin.clone()),
+            new_wasm_hash.clone(),
+        );
+
         #[cfg(not(test))]
         {
-            env.deployer().update_current_contract_wasm(_new_wasm_hash);
+            env.deployer().update_current_contract_wasm(new_wasm_hash);
         }
     }
 }
@@ -598,6 +618,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_upgrade_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_wasm_hash = BytesN::from_array(&env, &[0xabu8; 32]);
+        client.upgrade(&admin, &new_wasm_hash);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1); // upgrade event
+        let upgrade_event = &events[0];
+        assert_eq!(upgrade_event.0, (symbol_short!("UPGRADE"), admin));
+        assert_eq!(upgrade_event.1, new_wasm_hash);
+    }
+
     // --- get_engineers_by_issuer tests ---
 
     #[test]
@@ -669,6 +705,27 @@ mod tests {
         assert_eq!(client.get_engineers_by_issuer(&issuer_b).len(), 1);
         assert_eq!(client.get_engineers_by_issuer(&issuer_a).get(0).unwrap(), e1);
         assert_eq!(client.get_engineers_by_issuer(&issuer_b).get(0).unwrap(), e2);
+    }
+
+    #[test]
+    fn test_get_engineer_count_by_issuer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let e1 = Address::generate(&env);
+        let e2 = Address::generate(&env);
+
+        // Empty issuer
+        assert_eq!(client.get_engineer_count_by_issuer(&issuer), 0);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&e1, &BytesN::from_array(&env, &[1u8; 32]), &issuer, &31_536_000);
+        assert_eq!(client.get_engineer_count_by_issuer(&issuer), 1);
+
+        client.register_engineer(&e2, &BytesN::from_array(&env, &[2u8; 32]), &issuer, &31_536_000);
+        assert_eq!(client.get_engineer_count_by_issuer(&issuer), 2);
     }
 
     #[test]
