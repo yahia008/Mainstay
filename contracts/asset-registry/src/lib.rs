@@ -196,6 +196,10 @@ impl AssetRegistry {
             panic_with_error!(&env, ContractError::UnauthorizedOwner);
         }
 
+        if new_metadata == asset.metadata {
+            return;
+        }
+
         // Remove old dedup key
         let old_hash: BytesN<32> = env
             .crypto()
@@ -551,6 +555,33 @@ mod tests {
 
         // env.events().all() reflects only the most recent contract call
         assert_eq!(env.events().all().len(), 1);
+    }
+
+    #[test]
+    fn test_update_metadata_skips_noop() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "Original spec"),
+            &owner,
+        );
+
+        let original_asset = client.get_asset(&id);
+        client.update_asset_metadata(
+            &id,
+            &owner,
+            &String::from_str(&env, "Original spec"),
+        );
+
+        let updated_asset = client.get_asset(&id);
+        assert_eq!(updated_asset.metadata, original_asset.metadata);
+        assert_eq!(updated_asset.metadata_updated_at, original_asset.metadata_updated_at);
+        assert_eq!(env.events().all().len(), 0);
     }
 
     #[test]
