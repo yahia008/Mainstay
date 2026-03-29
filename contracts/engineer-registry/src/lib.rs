@@ -173,6 +173,11 @@ impl EngineerRegistry {
             list.push_back(issuer.clone());
         }
         env.storage().instance().set(&issuer_list_key(), &list);
+
+        env.events().publish(
+            (symbol_short!("ISS_ADD"), admin),
+            (issuer,),
+        );
     }
 
     pub fn remove_trusted_issuer(env: Env, admin: Address, issuer: Address) {
@@ -640,5 +645,29 @@ mod tests {
             env.storage().persistent().get_ttl(&engineer_key(&engineer))
         });
         assert!(ttl > 0, "TTL must be extended after revocation");
+    }
+
+    #[test]
+    fn test_add_trusted_issuer_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        client.add_trusted_issuer(&admin, &issuer);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+
+        let (_, topics, data) = events.get(0).unwrap();
+
+        use soroban_sdk::TryIntoVal;
+        let t0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        let t1: Address = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(t0, symbol_short!("ISS_ADD"));
+        assert_eq!(t1, admin);
+
+        let (emitted_issuer,): (Address,) = data.try_into_val(&env).unwrap();
+        assert_eq!(emitted_issuer, issuer);
     }
 }
