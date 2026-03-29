@@ -324,6 +324,8 @@ impl Lifecycle {
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
 
+        validate_notes_length(&env, &notes, config.max_notes_length);
+
         let mut history: Vec<MaintenanceRecord> = env
             .storage()
             .persistent()
@@ -456,6 +458,11 @@ impl Lifecycle {
             .instance()
             .get(&CONFIG)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+
+        for record in records.iter() {
+            validate_task_type(&env, &record.task_type);
+            validate_notes_length(&env, &record.notes, config.max_notes_length);
+        }
 
         // Validate all records fit before writing any
         if history.len() + records.len() > config.max_history {
