@@ -46,6 +46,10 @@ fn admin_key() -> Symbol {
     symbol_short!("ADMIN")
 }
 
+fn pending_admin_key() -> Symbol {
+    symbol_short!("PADMIN")
+}
+
 fn trusted_key(issuer: &Address) -> (Symbol, Address) {
     (symbol_short!("TRUSTED"), issuer.clone())
 }
@@ -352,24 +356,35 @@ impl EngineerRegistry {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Propose a new admin. The new admin must call `accept_admin` to complete the transfer.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        let stored: Address = env.storage().instance().get(&admin_key())
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        if stored != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().set(&pending_admin_key(), &new_admin);
+    }
+
+    /// Accept a pending admin transfer. Must be called by the proposed new admin.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+        let pending: Address = env.storage().instance().get(&pending_admin_key())
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAdmin));
+        if pending != new_admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().set(&admin_key(), &new_admin);
+        env.storage().instance().remove(&pending_admin_key());
+    }
+
     /// Admin-only function to upgrade the contract WASM to a new hash.
-    /// This allows for contract updates while maintaining state.
-    ///
-    /// # Arguments
-    /// * `admin` - The admin address that must match the stored admin
-    /// * `new_wasm_hash` - The hash of the new WASM code to deploy
-    ///
-    /// # Panics
-    /// - [`ContractError::NotInitialized`] if the admin has not been initialized
-    /// - [`ContractError::UnauthorizedAdmin`] if caller is not the admin
     pub fn upgrade(env: Env, admin: Address, _new_wasm_hash: BytesN<32>) {
         ensure_not_paused(&env);
         admin.require_auth();
 
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&admin_key())
+        let stored_admin: Address = env.storage().instance().get(&admin_key())
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         if stored_admin != admin {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
@@ -599,6 +614,59 @@ mod tests {
     }
 
     // --- get_engineers_by_issuer tests ---
+
+    #[test]
+    fn test_propose_and_accept_admin_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_non_admin_cannot_propose_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _) = setup(&env);
+
+        let outsider = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        let result = client.try_propose_admin(&outsider, &new_admin);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedAdmin as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_wrong_address_cannot_accept_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+
+        let result = client.try_accept_admin(&impostor);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedAdmin as u32,
+            ))),
+        );
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    // --- get_engineers_by_issuer tests (original) ---
 
     #[test]
     fn test_get_engineers_by_issuer_empty() {

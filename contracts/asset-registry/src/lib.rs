@@ -40,6 +40,7 @@ const ASSET_COUNT: Symbol = symbol_short!("A_COUNT");
 const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
 
 const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
+const PENDING_ADMIN_KEY: Symbol = symbol_short!("PADMIN");
 
 
 #[contracterror]
@@ -462,6 +463,29 @@ impl AssetRegistry {
         );
     }
 
+    /// Propose a new admin. The new admin must call `accept_admin` to complete the transfer.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        let stored: Address = env.storage().instance().get(&ADMIN_KEY)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        if stored != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().set(&PENDING_ADMIN_KEY, &new_admin);
+    }
+
+    /// Accept a pending admin transfer. Must be called by the proposed new admin.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+        let pending: Address = env.storage().instance().get(&PENDING_ADMIN_KEY)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAdmin));
+        if pending != new_admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().set(&ADMIN_KEY, &new_admin);
+        env.storage().instance().remove(&PENDING_ADMIN_KEY);
+    }
+
     /// Admin-only function to upgrade the contract WASM to a new hash.
     /// This allows for contract updates while maintaining state.
     ///
@@ -686,6 +710,68 @@ mod tests {
                 ContractError::UnauthorizedAdmin as u32,
             ))),
         );
+    }
+
+    #[test]
+    fn test_propose_and_accept_admin_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_non_admin_cannot_propose_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let outsider = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        let result = client.try_propose_admin(&outsider, &new_admin);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedAdmin as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_wrong_address_cannot_accept_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.propose_admin(&admin, &new_admin);
+
+        let result = client.try_accept_admin(&impostor);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedAdmin as u32,
+            ))),
+        );
+        // Original admin unchanged
+        assert_eq!(client.get_admin(), admin);
     }
 
     #[test]
