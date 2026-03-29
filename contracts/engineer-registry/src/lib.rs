@@ -9,6 +9,7 @@ pub enum ContractError {
     UnauthorizedAdmin = 2,
     EngineerNotFound = 3,
     NotInitialized = 4,
+    UntrustedIssuer = 5,
 }
 
 #[contracttype]
@@ -56,7 +57,7 @@ impl EngineerRegistry {
     ) {
         issuer.require_auth();
         if !env.storage().instance().has(&trusted_key(&issuer)) {
-            panic!("issuer is not trusted");
+            panic_with_error!(&env, ContractError::UntrustedIssuer);
         }
         assert!(
             credential_hash != BytesN::from_array(&env, &[0u8; 32]),
@@ -434,7 +435,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "issuer is not trusted")]
     fn test_register_engineer_untrusted_issuer_panics() {
         let env = Env::default();
         env.mock_all_auths();
@@ -444,8 +444,14 @@ mod tests {
         let untrusted_issuer = Address::generate(&env);
         let hash = BytesN::from_array(&env, &[1u8; 32]);
 
-        // untrusted_issuer was never added via add_trusted_issuer — must panic
-        client.register_engineer(&engineer, &hash, &untrusted_issuer, &31_536_000);
+        // untrusted_issuer was never added via add_trusted_issuer — must return UntrustedIssuer error
+        let result = client.try_register_engineer(&engineer, &hash, &untrusted_issuer, &31_536_000);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UntrustedIssuer as u32,
+            ))),
+        );
     }
 
     #[test]
