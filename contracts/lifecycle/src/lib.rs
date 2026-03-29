@@ -49,6 +49,7 @@ pub struct Config {
     pub score_increment: u32,
     pub decay_rate: u32,
     pub decay_interval: u64,
+    pub max_notes_length: u32,
 }
 
 const ASSET_REGISTRY: Symbol = symbol_short!("REGISTRY");
@@ -58,6 +59,7 @@ const DEFAULT_MAX_HISTORY: u32 = 200;
 const DEFAULT_SCORE_INCREMENT: u32 = 5;
 const DEFAULT_DECAY_RATE: u32 = 5;
 const DEFAULT_DECAY_INTERVAL: u64 = 2592000; // 30 days in seconds
+const DEFAULT_MAX_NOTES_LENGTH: u32 = 256;
 
 fn history_key(asset_id: u64) -> (Symbol, u64) {
     (symbol_short!("HIST"), asset_id)
@@ -108,6 +110,12 @@ fn validate_task_type(env: &Env, task_type: &Symbol) {
     }
 }
 
+fn validate_notes_length(env: &Env, notes: &String, max_notes_length: u32) {
+    if notes.len() > max_notes_length {
+        panic_with_error!(env, ContractError::InvalidNotesLength);
+    }
+}
+
 // Minimal client interface for cross-contract call to EngineerRegistry
 mod engineer_registry {
     use soroban_sdk::{contractclient, Address, Env};
@@ -150,6 +158,7 @@ impl Lifecycle {
             score_increment: DEFAULT_SCORE_INCREMENT,
             decay_rate: DEFAULT_DECAY_RATE,
             decay_interval: DEFAULT_DECAY_INTERVAL,
+            max_notes_length: DEFAULT_MAX_NOTES_LENGTH,
         };
         env.storage().instance().set(&CONFIG, &config);
 
@@ -237,6 +246,8 @@ impl Lifecycle {
             .instance()
             .get(&CONFIG)
             .expect("config not set");
+
+        validate_notes_length(&env, &notes, config.max_notes_length);
 
         let mut history: Vec<MaintenanceRecord> = env
             .storage()
@@ -338,15 +349,16 @@ impl Lifecycle {
             .get(&history_key(asset_id))
             .unwrap_or(Vec::new(&env));
 
-        for record in records.iter() {
-            validate_task_type(&env, &record.task_type);
-        }
-
         let config: Config = env
             .storage()
             .instance()
             .get(&CONFIG)
             .expect("config not set");
+
+        for record in records.iter() {
+            validate_task_type(&env, &record.task_type);
+            validate_notes_length(&env, &record.notes, config.max_notes_length);
+        }
 
         // Validate all records fit before writing any
         if history.len() + records.len() > config.max_history {
@@ -719,6 +731,57 @@ mod tests {
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
                 ContractError::InvalidTaskType as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_submit_maintenance_rejects_oversized_notes() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        let long_notes = String::from_str(&env, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+
+        let result = client.try_submit_maintenance(
+            &asset_id,
+            &symbol_short!("ENGINE"),
+            &long_notes,
+            &engineer,
+        );
+
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidNotesLength as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_batch_submit_maintenance_rejects_oversized_notes() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        let long_notes = String::from_str(&env, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        let mut records = Vec::new(&env);
+        records.push_back(BatchRecord {
+            task_type: symbol_short!("ENGINE"),
+            notes: long_notes,
+        });
+
+        let result = client.try_batch_submit_maintenance(&asset_id, &records, &engineer);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidNotesLength as u32,
             ))),
         );
     }
