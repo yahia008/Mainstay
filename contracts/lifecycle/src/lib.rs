@@ -264,7 +264,8 @@ impl Lifecycle {
             panic_with_error!(&env, ContractError::AlreadyInitialized);
         }
 
-        if asset_registry == engineer_registry {
+        let zero = Address::from_contract_id(&BytesN::from_array(&env, &[0u8; 32]));
+        if asset_registry == zero || engineer_registry == zero || admin == zero {
             panic_with_error!(&env, ContractError::InvalidConfig);
         }
 
@@ -1911,6 +1912,39 @@ for _ in 0..3 {
     }
 
     #[test]
+    fn test_full_cross_contract_threshold_boundary() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Set eligibility threshold to a deterministic value for boundary testing.
+        client.update_eligibility_threshold(&admin, &10);
+
+        // Just below threshold: one maintenance event (FILTER = 5 points)
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("FILTER"),
+            &String::from_str(&env, "Filter replacement 1"),
+            &engineer,
+        );
+        assert_eq!(client.get_collateral_score(&asset_id), 5);
+        assert!(!client.is_collateral_eligible(&asset_id));
+
+        // Cross threshold with one more event (total = 10)
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("FILTER"),
+            &String::from_str(&env, "Filter replacement 2"),
+            &engineer,
+        );
+        assert_eq!(client.get_collateral_score(&asset_id), 10);
+        assert!(client.is_collateral_eligible(&asset_id));
+    }
+
+    #[test]
     fn test_update_eligibility_threshold_non_admin_rejected() {
         let env = Env::default();
         env.mock_all_auths();
@@ -3179,6 +3213,11 @@ for _ in 0..3 {
 
         client.pause(&admin);
 
+        // Read-only access should still work while paused
+        let score = client.get_collateral_score(&asset_id);
+        assert_eq!(score, 0);
+        assert_eq!(client.try_get_collateral_score(&asset_id), Ok(0));
+
         // submit_maintenance
         assert_eq!(
             client.try_submit_maintenance(&asset_id, &symbol_short!("OIL_CHG"), &String::from_str(&env, ""), &engineer),
@@ -3257,6 +3296,68 @@ for _ in 0..3 {
         );
         assert_eq!(client.get_collateral_score(&asset_id), 50);
         assert!(client.is_collateral_eligible(&asset_id));
+    }
+
+    // --- Issue #103: initialize rejects zero addresses ---
+
+    #[test]
+    fn test_initialize_rejects_zero_asset_registry() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let engineer_registry_id = env.register(EngineerRegistry, ());
+        let lifecycle_id = env.register(Lifecycle, ());
+        let admin = Address::generate(&env);
+        let zero = Address::from_contract_id(&BytesN::from_array(&env, &[0u8; 32]));
+
+        let client = LifecycleClient::new(&env, &lifecycle_id);
+        let result = client.try_initialize(&zero, &engineer_registry_id, &admin, &0u32);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidConfig as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_initialize_rejects_zero_engineer_registry() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let asset_registry_id = env.register(AssetRegistry, ());
+        let lifecycle_id = env.register(Lifecycle, ());
+        let admin = Address::generate(&env);
+        let zero = Address::from_contract_id(&BytesN::from_array(&env, &[0u8; 32]));
+
+        let client = LifecycleClient::new(&env, &lifecycle_id);
+        let result = client.try_initialize(&asset_registry_id, &zero, &admin, &0u32);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidConfig as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_initialize_rejects_zero_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let asset_registry_id = env.register(AssetRegistry, ());
+        let engineer_registry_id = env.register(EngineerRegistry, ());
+        let lifecycle_id = env.register(Lifecycle, ());
+        let zero = Address::from_contract_id(&BytesN::from_array(&env, &[0u8; 32]));
+
+        let client = LifecycleClient::new(&env, &lifecycle_id);
+        let result = client.try_initialize(&asset_registry_id, &engineer_registry_id, &zero, &0u32);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidConfig as u32,
+            ))),
+        );
     }
 
     #[test]
