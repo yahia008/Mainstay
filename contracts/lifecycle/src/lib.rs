@@ -1736,6 +1736,40 @@ mod tests {
     }
 
     #[test]
+    fn test_decay_score_returns_zero_for_asset_with_no_maintenance() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, _, _) = setup(&env, 0);
+        let asset_admin = Address::generate(&env);
+        asset_registry_client.initialize_admin(&asset_admin);
+        asset_registry_client.add_asset_type(&asset_admin, &symbol_short!("GENSET"));
+        let owner = Address::generate(&env);
+        let asset_id = asset_registry_client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "No-maintenance asset"),
+            &owner,
+        );
+
+        // Advance ledger so last_update_key unwrap_or(0) would produce a large time_elapsed
+        env.ledger().with_mut(|li| li.timestamp += 10_000_000);
+
+        // Score is 0 (never maintained) — early return must fire and return 0
+        assert_eq!(client.decay_score(&asset_id), 0);
+    }
+
+    #[test]
+    fn test_decay_score_returns_zero_for_nonexistent_asset_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, _) = setup(&env, 0);
+
+        // Asset ID 9999 was never registered; score_key is absent → unwrap_or(0) → early return
+        assert_eq!(client.decay_score(&9999u64), 0);
+    }
+
+    #[test]
     fn test_submit_maintenance_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
