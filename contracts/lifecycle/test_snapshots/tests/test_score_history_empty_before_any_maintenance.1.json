@@ -367,6 +367,14 @@
                             },
                             {
                               "key": {
+                                "symbol": "eligibility_threshold"
+                              },
+                              "val": {
+                                "u32": 50
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "max_history"
                               },
                               "val": {
