@@ -876,6 +876,41 @@ impl Lifecycle {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Get a paginated list of asset IDs that an engineer has worked on.
+    ///
+    /// # Arguments
+    /// * `env` - The contract environment
+    /// * `engineer` - The address of the engineer to query
+    /// * `offset` - Number of records to skip
+    /// * `limit` - Maximum number of records to return
+    ///
+    /// # Returns
+    /// Vec containing the requested page of asset IDs
+    pub fn get_engineer_maintenance_history_page(
+        env: Env,
+        engineer: Address,
+        offset: u32,
+        limit: u32,
+    ) -> Vec<u64> {
+        let history: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&engineer_history_key(&engineer))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let len = history.len();
+        if offset >= len || limit == 0 {
+            return Vec::new(&env);
+        }
+
+        let end = (offset + limit).min(len);
+        let mut page = Vec::new(&env);
+        for i in offset..end {
+            page.push_back(history.get(i).unwrap());
+        }
+        page
+    }
+
     /// Admin-only function to update the asset registry address.
     /// Useful for registry migrations or updates.
     ///
@@ -2379,6 +2414,37 @@ mod tests {
         assert_eq!(client.get_maintenance_history_page(&asset_id, &10, &2).len(), 0);
         // limit=0 → empty
         assert_eq!(client.get_maintenance_history_page(&asset_id, &0, &0).len(), 0);
+    }
+
+    #[test]
+    fn test_get_engineer_maintenance_history_page() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Submit maintenance on 5 different assets
+        for _ in 0..5 {
+            let asset_id = register_asset(&env, &asset_registry_client);
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, "oil change"),
+                &engineer,
+            );
+        }
+
+        // First page: offset=0, limit=2 → 2 assets
+        assert_eq!(client.get_engineer_maintenance_history_page(&engineer, &0, &2).len(), 2);
+        // Second page: offset=2, limit=2 → 2 assets
+        assert_eq!(client.get_engineer_maintenance_history_page(&engineer, &2, &2).len(), 2);
+        // Third page: offset=4, limit=2 → 1 asset (only one left)
+        assert_eq!(client.get_engineer_maintenance_history_page(&engineer, &4, &2).len(), 1);
+        // Out-of-bounds offset → empty
+        assert_eq!(client.get_engineer_maintenance_history_page(&engineer, &10, &2).len(), 0);
+        // limit=0 → empty
+        assert_eq!(client.get_engineer_maintenance_history_page(&engineer, &0, &0).len(), 0);
     }
 
     // --- Issue #207: decay_score extends TTL ---
