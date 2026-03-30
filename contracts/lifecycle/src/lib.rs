@@ -2047,6 +2047,61 @@ mod tests {
         );
     }
 
+    /// Issue #128: revoked engineer cannot submit, but can after re-registration with a new credential.
+    #[test]
+    fn test_submit_maintenance_revoked_then_reregistered_engineer() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+
+        // Set up a trusted issuer and register the engineer
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let hash_v1 = BytesN::from_array(&env, &[1u8; 32]);
+
+        engineer_registry_client.initialize_admin(&admin);
+        engineer_registry_client.add_trusted_issuer(&admin, &issuer);
+        engineer_registry_client.register_engineer(&engineer, &hash_v1, &issuer, &31_536_000);
+
+        // Revoke the credential
+        engineer_registry_client.revoke_credential(&engineer);
+        assert!(!engineer_registry_client.verify_engineer(&engineer));
+
+        // Attempt to submit maintenance — must fail with UnauthorizedEngineer
+        let result = client.try_submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "Post-revocation attempt"),
+            &engineer,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedEngineer as u32,
+            ))),
+        );
+
+        // Re-register the same engineer with a new credential hash
+        let hash_v2 = BytesN::from_array(&env, &[2u8; 32]);
+        engineer_registry_client.register_engineer(&engineer, &hash_v2, &issuer, &31_536_000);
+        assert!(engineer_registry_client.verify_engineer(&engineer));
+
+        // Submission must now succeed
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "Post-reregistration submission"),
+            &engineer,
+        );
+
+        let history = client.get_maintenance_history(&asset_id);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.get(0).unwrap().engineer, engineer);
+    }
+
     #[test]
     fn test_full_lifecycle_integration() {
         let env = Env::default();
