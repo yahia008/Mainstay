@@ -81,6 +81,23 @@ fn score_history_key(asset_id: u64) -> (Symbol, u64) {
     (symbol_short!("SCHIST"), asset_id)
 }
 
+/// Append a ScoreEntry to score history, evicting the oldest entry if the
+/// vec would exceed `max_history` entries.
+fn score_history_push(env: &Env, asset_id: u64, entry: ScoreEntry, max_history: u32) {
+    let key = score_history_key(asset_id);
+    let mut history: Vec<ScoreEntry> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    if max_history > 0 && history.len() >= max_history {
+        history.remove(0);
+    }
+    history.push_back(entry);
+    env.storage().persistent().set(&key, &history);
+    env.storage().persistent().extend_ttl(&key, 518400, 518400);
+}
+
 fn last_update_key(asset_id: u64) -> (Symbol, u64) {
     (symbol_short!("LUPD"), asset_id)
 }
@@ -164,18 +181,7 @@ fn apply_decay(
         .persistent()
         .extend_ttl(&last_update_key(asset_id), 518400, 518400);
 
-    let mut score_history: Vec<ScoreEntry> = env
-        .storage()
-        .persistent()
-        .get(&score_history_key(asset_id))
-        .unwrap_or(Vec::new(env));
-    score_history.push_back(ScoreEntry {
-        timestamp: current_time,
-        score: new_score,
-    });
-    env.storage()
-        .persistent()
-        .set(&score_history_key(asset_id), &score_history);
+    score_history_push(env, asset_id, ScoreEntry { timestamp: current_time, score: new_score }, config.max_history);
 
     if emit_event {
         env.events().publish(
@@ -580,21 +586,7 @@ impl Lifecycle {
             .extend_ttl(&score_key(asset_id), 518400, 518400);
 
         // Append (timestamp, score) snapshot to score history
-        let mut score_history: Vec<ScoreEntry> = env
-            .storage()
-            .persistent()
-            .get(&score_history_key(asset_id))
-            .unwrap_or(Vec::new(&env));
-        score_history.push_back(ScoreEntry {
-            timestamp,
-            score: new_score,
-        });
-        env.storage()
-            .persistent()
-            .set(&score_history_key(asset_id), &score_history);
-        env.storage()
-            .persistent()
-            .extend_ttl(&score_history_key(asset_id), 518400, 518400);
+        score_history_push(&env, asset_id, ScoreEntry { timestamp, score: new_score }, config.max_history);
 
         // Update last maintenance timestamp for decay tracking
         env.storage()
@@ -682,11 +674,6 @@ impl Lifecycle {
             .persistent()
             .get(&score_key(asset_id))
             .unwrap_or(0u32);
-        let mut score_history: Vec<ScoreEntry> = env
-            .storage()
-            .persistent()
-            .get(&score_history_key(asset_id))
-            .unwrap_or(Vec::new(&env));
 
         for record in records.iter() {
             let weight = get_task_weight(&env, &record.task_type);
@@ -698,7 +685,7 @@ impl Lifecycle {
                 engineer: engineer.clone(),
                 timestamp,
             });
-            score_history.push_back(ScoreEntry { timestamp, score });
+            score_history_push(&env, asset_id, ScoreEntry { timestamp, score }, config.max_history);
         }
 
         // Add to engineer history only once per asset per batch
@@ -708,8 +695,6 @@ impl Lifecycle {
         env.storage().persistent().extend_ttl(&history_key(asset_id), 518400, 518400);
         env.storage().persistent().set(&score_key(asset_id), &score);
         env.storage().persistent().extend_ttl(&score_key(asset_id), 518400, 518400);
-        env.storage().persistent().set(&score_history_key(asset_id), &score_history);
-        env.storage().persistent().extend_ttl(&score_history_key(asset_id), 518400, 518400);
         env.storage().persistent().set(&last_update_key(asset_id), &timestamp);
         env.storage().persistent().extend_ttl(&last_update_key(asset_id), 518400, 518400);
     }
@@ -2290,6 +2275,39 @@ for _ in 0..3 {
         // After 10 REBUILD tasks the score is already 100; subsequent entries stay at 100
         assert_eq!(history.get(10).unwrap().score, 100);
         assert_eq!(history.get(11).unwrap().score, 100);
+    }
+
+    #[test]
+    fn test_score_history_pruned_at_max_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // max_history = 5
+        let (client, asset_registry_client, engineer_registry_client, _) = setup(&env, 5);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Submit 8 records — history_key is capped at 5, score_history must also stay at 5
+        for _ in 0..5 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, ""),
+                &engineer,
+            );
+        }
+        assert_eq!(client.get_score_history(&asset_id).len(), 5);
+
+        // history_key is now full; further submit_maintenance calls are rejected,
+        // so trigger score_history growth via decay_score instead.
+        // Advance past one decay interval and call decay_score 3 more times.
+        for _ in 0..3 {
+            env.ledger().with_mut(|li| li.timestamp += DEFAULT_DECAY_INTERVAL);
+            client.decay_score(&asset_id);
+        }
+
+        // score_history must never exceed max_history
+        assert_eq!(client.get_score_history(&asset_id).len(), 5);
     }
 
     #[test]
