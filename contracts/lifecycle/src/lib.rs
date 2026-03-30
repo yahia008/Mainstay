@@ -264,6 +264,11 @@ impl Lifecycle {
             panic_with_error!(&env, ContractError::AlreadyInitialized);
         }
 
+        let zero = Address::from_contract_id(&BytesN::from_array(&env, &[0u8; 32]));
+        if asset_registry == zero || engineer_registry == zero || admin == zero {
+            panic_with_error!(&env, ContractError::InvalidConfig);
+        }
+
         env.storage()
             .instance()
             .set(&ASSET_REGISTRY, &asset_registry);
@@ -3267,6 +3272,68 @@ for _ in 0..3 {
         );
         assert_eq!(client.get_collateral_score(&asset_id), 50);
         assert!(client.is_collateral_eligible(&asset_id));
+    }
+
+    // --- Issue #103: initialize rejects zero addresses ---
+
+    #[test]
+    fn test_initialize_rejects_zero_asset_registry() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let engineer_registry_id = env.register(EngineerRegistry, ());
+        let lifecycle_id = env.register(Lifecycle, ());
+        let admin = Address::generate(&env);
+        let zero = Address::from_contract_id(&BytesN::from_array(&env, &[0u8; 32]));
+
+        let client = LifecycleClient::new(&env, &lifecycle_id);
+        let result = client.try_initialize(&zero, &engineer_registry_id, &admin, &0u32);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidConfig as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_initialize_rejects_zero_engineer_registry() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let asset_registry_id = env.register(AssetRegistry, ());
+        let lifecycle_id = env.register(Lifecycle, ());
+        let admin = Address::generate(&env);
+        let zero = Address::from_contract_id(&BytesN::from_array(&env, &[0u8; 32]));
+
+        let client = LifecycleClient::new(&env, &lifecycle_id);
+        let result = client.try_initialize(&asset_registry_id, &zero, &admin, &0u32);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidConfig as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_initialize_rejects_zero_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let asset_registry_id = env.register(AssetRegistry, ());
+        let engineer_registry_id = env.register(EngineerRegistry, ());
+        let lifecycle_id = env.register(Lifecycle, ());
+        let zero = Address::from_contract_id(&BytesN::from_array(&env, &[0u8; 32]));
+
+        let client = LifecycleClient::new(&env, &lifecycle_id);
+        let result = client.try_initialize(&asset_registry_id, &engineer_registry_id, &zero, &0u32);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidConfig as u32,
+            ))),
+        );
     }
 
     #[test]
