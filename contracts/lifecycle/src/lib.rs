@@ -535,10 +535,6 @@ impl Lifecycle {
             .get(&history_key(asset_id))
             .unwrap_or(Vec::new(&env));
 
-        for record in records.iter() {
-            validate_task_type(&env, &record.task_type);
-        }
-
         let config: Config = env
             .storage()
             .instance()
@@ -547,7 +543,6 @@ impl Lifecycle {
 
         for record in records.iter() {
             validate_task_type(&env, &record.task_type);
-            validate_notes_length(&env, &record.notes, config.max_notes_length);
         }
 
         // Validate all records fit before writing any
