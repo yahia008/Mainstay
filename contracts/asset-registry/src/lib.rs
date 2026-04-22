@@ -16,6 +16,7 @@ pub enum ContractError {
     NotInitialized = 5,
     AdminAlreadyInitialized = 6,
     Paused = 7,
+    InvalidAssetType = 8,
 }
 
 #[contracttype]
@@ -40,6 +41,8 @@ const ASSET_COUNT: Symbol = symbol_short!("A_COUNT");
 const PAUSED_KEY: Symbol = symbol_short!("PAUSED");
 
 const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
+const ASSET_TYPE_PREFIX: Symbol = symbol_short!("AST_TYPE");
+const PENDING_ADMIN_KEY: Symbol = symbol_short!("PADMIN");
 
 
 #[contracterror]
@@ -61,6 +64,11 @@ fn dedup_key(owner: &Address, hash: &BytesN<32>) -> (Symbol, Address, BytesN<32>
 /// Owner index key: owner → Vec<u64> of asset IDs.
 fn owner_index_key(owner: &Address) -> (Symbol, Address) {
     (symbol_short!("OWN_IDX"), owner.clone())
+}
+
+/// Asset type allowlist key: asset_type → bool.
+fn asset_type_key(asset_type: &Symbol) -> (Symbol, Symbol) {
+    (ASSET_TYPE_PREFIX, asset_type.clone())
 }
 
 /// Append an asset ID to the owner's index.
@@ -116,12 +124,17 @@ impl AssetRegistry {
     ///
     /// # Panics
     /// - [`ContractError::DuplicateAsset`] if the same owner tries to register identical metadata
+    /// - [`ContractError::InvalidAssetType`] if the asset type is not in the allowlist
     pub fn register_asset(env: Env, asset_type: Symbol, metadata: String, owner: Address) -> u64 {
         ensure_not_paused(&env);
         owner.require_auth();
 
+        if !Self::is_valid_asset_type(env.clone(), asset_type.clone()) {
+            panic_with_error!(&env, ContractError::InvalidAssetType);
+        }
+
         // Deduplication: reject if this owner already registered identical metadata.
-        let meta_bytes = Bytes::from(metadata.clone().to_xdr(&env));
+        let meta_bytes = metadata.clone().to_xdr(&env);
         let meta_hash: BytesN<32> = env.crypto().sha256(&meta_bytes).into();
         let dk = dedup_key(&owner, &meta_hash);
         if env.storage().persistent().has(&dk) {
@@ -138,7 +151,9 @@ impl AssetRegistry {
             metadata_updated_at: env.ledger().timestamp(),
         };
         env.storage().persistent().set(&asset_key(id), &asset);
-        env.storage().persistent().extend_ttl(&asset_key(id), 518400, 518400); // Extend TTL for persistent storage entries to prevent data loss
+        env.storage()
+            .persistent()
+            .extend_ttl(&asset_key(id), 518400, 518400); // Extend TTL for persistent storage entries to prevent data loss
         env.storage().instance().set(&ASSET_COUNT, &id);
         env.storage().persistent().set(&dk, &id);
 
@@ -174,6 +189,9 @@ impl AssetRegistry {
         let mut batch_hashes: Vec<BytesN<32>> = Vec::new(&env);
 
         for asset_in in assets.iter() {
+            if !Self::is_valid_asset_type(env.clone(), asset_in.asset_type.clone()) {
+                panic_with_error!(&env, ContractError::InvalidAssetType);
+            }
             let meta_bytes = Bytes::from(asset_in.metadata.clone().to_xdr(&env));
             let meta_hash: BytesN<32> = env.crypto().sha256(&meta_bytes).into();
 
@@ -212,6 +230,11 @@ impl AssetRegistry {
             );
 
             ids.push_back(id);
+        }
+
+        // Ensure owner index TTL is extended after all batch writes
+        if !ids.is_empty() {
+            env.storage().persistent().extend_ttl(&owner_index_key(&owner), 518400, 518400);
         }
 
         ids
@@ -323,6 +346,11 @@ impl AssetRegistry {
     /// # Arguments
     /// * `asset_id` - The unique identifier of the asset to deregister
     ///
+    /// # Behavior
+    /// If the dedup key has already expired from storage, the remove operation
+    /// is a no-op. This allows the same owner to re-register the same metadata
+    /// after the dedup key has naturally expired.
+    ///
     /// # Panics
     /// - [`ContractError::AssetNotFound`] if no asset exists with the given ID
     /// - [`ContractError::UnauthorizedAdmin`] if caller is not the admin
@@ -330,16 +358,21 @@ impl AssetRegistry {
         ensure_not_paused(&env);
         let admin = Self::get_admin(env.clone());
         admin.require_auth();
-        
-        let asset: Asset = env.storage().persistent()
+
+        let asset: Asset = env
+            .storage()
+            .persistent()
             .get(&asset_key(asset_id))
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::AssetNotFound));
         
         // Remove asset storage
         env.storage().persistent().remove(&asset_key(asset_id));
-        
+
         // Remove deduplication key
-        let dk = dedup_key(&asset.owner, &env.crypto().sha256(&Bytes::from(asset.metadata.to_xdr(&env))).into());
+        let dk = dedup_key(
+            &asset.owner,
+            &env.crypto().sha256(&asset.metadata.to_xdr(&env)).into(),
+        );
         env.storage().persistent().remove(&dk);
 
         // Remove from owner index
@@ -348,7 +381,7 @@ impl AssetRegistry {
         // Emit deregistration event
         env.events().publish(
             (symbol_short!("DEREG_AST"), asset_id),
-            (asset.asset_type.clone(), asset.owner.clone())
+            (asset.asset_type.clone(), asset.owner.clone()),
         );
     }
 
@@ -384,16 +417,15 @@ impl AssetRegistry {
         }
 
         // Remove old dedup key
-        let old_hash: BytesN<32> = env
-            .crypto()
-            .sha256(&Bytes::from(asset.metadata.to_xdr(&env)))
-            .into();
-        env.storage().persistent().remove(&dedup_key(&owner, &old_hash));
+        let old_hash: BytesN<32> = env.crypto().sha256(&asset.metadata.to_xdr(&env)).into();
+        env.storage()
+            .persistent()
+            .remove(&dedup_key(&owner, &old_hash));
 
         // Reject if new metadata is a duplicate for this owner
         let new_hash: BytesN<32> = env
             .crypto()
-            .sha256(&Bytes::from(new_metadata.clone().to_xdr(&env)))
+            .sha256(&new_metadata.clone().to_xdr(&env))
             .into();
         let new_dk = dedup_key(&owner, &new_hash);
         if env.storage().persistent().has(&new_dk) {
@@ -442,7 +474,7 @@ impl AssetRegistry {
         // Move dedup key to new owner
         let hash: BytesN<32> = env
             .crypto()
-            .sha256(&Bytes::from(asset.metadata.clone().to_xdr(&env)))
+            .sha256(&asset.metadata.clone().to_xdr(&env))
             .into();
         env.storage().persistent().remove(&dedup_key(&current_owner, &hash));
         env.storage().persistent().set(&dedup_key(&new_owner, &hash), &asset_id);
@@ -454,12 +486,37 @@ impl AssetRegistry {
 
         asset.owner = new_owner.clone();
         env.storage().persistent().set(&asset_key(asset_id), &asset);
-        env.storage().persistent().extend_ttl(&asset_key(asset_id), 518400, 518400);
+        env.storage()
+            .persistent()
+            .extend_ttl(&asset_key(asset_id), 518400, 518400);
 
         env.events().publish(
             (symbol_short!("TRANSFER"), asset_id),
             (current_owner, new_owner, env.ledger().timestamp()),
         );
+    }
+
+    /// Propose a new admin. The new admin must call `accept_admin` to complete the transfer.
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        let stored: Address = env.storage().instance().get(&ADMIN_KEY)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        if stored != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().set(&PENDING_ADMIN_KEY, &new_admin);
+    }
+
+    /// Accept a pending admin transfer. Must be called by the proposed new admin.
+    pub fn accept_admin(env: Env, new_admin: Address) {
+        new_admin.require_auth();
+        let pending: Address = env.storage().instance().get(&PENDING_ADMIN_KEY)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::UnauthorizedAdmin));
+        if pending != new_admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().set(&ADMIN_KEY, &new_admin);
+        env.storage().instance().remove(&PENDING_ADMIN_KEY);
     }
 
     /// Admin-only function to upgrade the contract WASM to a new hash.
@@ -472,7 +529,7 @@ impl AssetRegistry {
     /// # Panics
     /// - [`ContractError::NotInitialized`] if the admin has not been initialized
     /// - [`ContractError::UnauthorizedAdmin`] if caller is not the admin
-    pub fn upgrade(env: Env, admin: Address, _new_wasm_hash: BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
         ensure_not_paused(&env);
         admin.require_auth();
 
@@ -485,26 +542,69 @@ impl AssetRegistry {
             panic_with_error!(&env, ContractError::UnauthorizedAdmin);
         }
 
+        env.events().publish(
+            (symbol_short!("UPGRADE"), admin.clone()),
+            new_wasm_hash.clone(),
+        );
+
         #[cfg(not(test))]
         {
-            env.deployer().update_current_contract_wasm(_new_wasm_hash);
+            env.deployer().update_current_contract_wasm(new_wasm_hash);
         }
     }
-}
 
+    /// Admin-only function to allow a new asset type symbol.
+    ///
+    /// # Arguments
+    /// * `admin` - The address that must match the stored admin
+    /// * `asset_type` - The symbol of the new asset type to allow
+    pub fn add_asset_type(env: Env, admin: Address, asset_type: Symbol) {
+        admin.require_auth();
+        let stored_admin: Address = Self::get_admin(env.clone());
+        if stored_admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().set(&asset_type_key(&asset_type), &true);
+    }
+
+    /// Admin-only function to remove an asset type from the allowlist.
+    /// Existing assets of this type are not affected, but no new ones can be registered.
+    ///
+    /// # Arguments
+    /// * `admin` - The address that must match the stored admin
+    /// * `asset_type` - The symbol of the asset type to remove
+    pub fn remove_asset_type(env: Env, admin: Address, asset_type: Symbol) {
+        admin.require_auth();
+        let stored_admin: Address = Self::get_admin(env.clone());
+        if stored_admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        env.storage().instance().remove(&asset_type_key(&asset_type));
+    }
+
+    /// Check if an asset type is valid (exists in the allowlist).
+    ///
+    /// # Arguments
+    /// * `asset_type` - The symbol of the asset type to check
+    ///
+    /// # Returns
+    /// `true` if valid; `false` otherwise
+    pub fn is_valid_asset_type(env: Env, asset_type: Symbol) -> bool {
+        env.storage().instance().get(&asset_type_key(&asset_type)).unwrap_or(false)
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::storage::Persistent;
     use soroban_sdk::{
         symbol_short,
         testutils::{Address as _, Events, Ledger as _},
         Bytes, Env, String,
     };
-    use soroban_sdk::testutils::storage::Persistent;
 
     use crate::AssetRegistryClient;
-
 
     #[test]
     fn test_register_and_get_asset() {
@@ -512,6 +612,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let id = client.register_asset(
@@ -532,6 +636,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("TURBINE"));
 
         let expected_owner = Address::generate(&env);
         let id = client.register_asset(
@@ -565,6 +673,10 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner = Address::generate(&env);
         let metadata = String::from_str(&env, "CAT-3516-SN123456");
 
@@ -589,6 +701,10 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner_a = Address::generate(&env);
         let owner_b = Address::generate(&env);
         let metadata = String::from_str(&env, "CAT-3516-SN123456");
@@ -605,6 +721,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let asset_type = symbol_short!("GENSET");
@@ -624,10 +744,14 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner = Address::generate(&env);
         let asset_type = symbol_short!("GENSET");
         let metadata = String::from_str(&env, "Caterpillar 3516 Generator");
-        
+
         let id = client.register_asset(&asset_type, &metadata, &owner);
 
         // Verify TTL is set for asset storage entry
@@ -637,7 +761,7 @@ mod tests {
         assert!(asset_ttl > 0, "Asset TTL should be extended");
 
         // Verify TTL is set for deduplication key
-        let meta_bytes = Bytes::from(metadata.to_xdr(&env));
+        let meta_bytes = metadata.to_xdr(&env);
         let meta_hash: BytesN<32> = env.crypto().sha256(&meta_bytes).into();
         let dedup_ttl = env.as_contract(&contract_id, || {
             let dk = dedup_key(&owner, &meta_hash);
@@ -689,11 +813,77 @@ mod tests {
     }
 
     #[test]
+    fn test_propose_and_accept_admin_transfer() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_non_admin_cannot_propose_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let outsider = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        let result = client.try_propose_admin(&outsider, &new_admin);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedAdmin as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_wrong_address_cannot_accept_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.propose_admin(&admin, &new_admin);
+
+        let result = client.try_accept_admin(&impostor);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::UnauthorizedAdmin as u32,
+            ))),
+        );
+        // Original admin unchanged
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
     fn test_owner_can_update_metadata() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let id = client.register_asset(
@@ -702,14 +892,13 @@ mod tests {
             &owner,
         );
 
-        client.update_asset_metadata(
-            &id,
-            &owner,
-            &String::from_str(&env, "Refurbished spec v2"),
-        );
+        client.update_asset_metadata(&id, &owner, &String::from_str(&env, "Refurbished spec v2"));
 
         let asset = client.get_asset(&id);
-        assert_eq!(asset.metadata, String::from_str(&env, "Refurbished spec v2"));
+        assert_eq!(
+            asset.metadata,
+            String::from_str(&env, "Refurbished spec v2")
+        );
     }
 
     #[test]
@@ -718,6 +907,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let id = client.register_asset(
@@ -748,6 +941,10 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner = Address::generate(&env);
         let id = client.register_asset(
             &symbol_short!("GENSET"),
@@ -755,11 +952,7 @@ mod tests {
             &owner,
         );
 
-        client.update_asset_metadata(
-            &id,
-            &owner,
-            &String::from_str(&env, "Refurbished spec v2"),
-        );
+        client.update_asset_metadata(&id, &owner, &String::from_str(&env, "Refurbished spec v2"));
 
         // env.events().all() reflects only the most recent contract call
         assert_eq!(env.events().all().len(), 1);
@@ -771,6 +964,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let id = client.register_asset(
@@ -798,6 +995,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let id = client.register_asset(
@@ -828,11 +1029,8 @@ mod tests {
         let client = AssetRegistryClient::new(&env, &contract_id);
 
         let owner = Address::generate(&env);
-        let result = client.try_update_asset_metadata(
-            &999u64,
-            &owner,
-            &String::from_str(&env, "New spec"),
-        );
+        let result =
+            client.try_update_asset_metadata(&999u64, &owner, &String::from_str(&env, "New spec"));
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
@@ -847,6 +1045,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let new_owner = Address::generate(&env);
@@ -868,6 +1070,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let attacker = Address::generate(&env);
@@ -894,6 +1100,10 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner = Address::generate(&env);
         let new_owner = Address::generate(&env);
         let id = client.register_asset(
@@ -915,6 +1125,10 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner = Address::generate(&env);
         let new_owner = Address::generate(&env);
         let metadata = String::from_str(&env, "CAT-3516");
@@ -934,6 +1148,10 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner = Address::generate(&env);
         // Register two assets with different metadata
         let id1 = client.register_asset(
@@ -948,11 +1166,8 @@ mod tests {
         );
 
         // Trying to update asset 1 to "Spec B" (already taken by same owner) should fail
-        let result = client.try_update_asset_metadata(
-            &id1,
-            &owner,
-            &String::from_str(&env, "Spec B"),
-        );
+        let result =
+            client.try_update_asset_metadata(&id1, &owner, &String::from_str(&env, "Spec B"));
         assert_eq!(
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
@@ -967,6 +1182,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let id = client.register_asset(
@@ -993,6 +1212,11 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+        client.add_asset_type(&admin, &symbol_short!("TURBINE"));
 
         let owner = Address::generate(&env);
         let id1 = client.register_asset(
@@ -1031,6 +1255,10 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner = Address::generate(&env);
         let new_owner = Address::generate(&env);
         let id = client.register_asset(
@@ -1056,6 +1284,10 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner = Address::generate(&env);
         let meta_a = String::from_str(&env, "Spec A");
         let meta_b = String::from_str(&env, "Spec B");
@@ -1079,6 +1311,20 @@ mod tests {
     }
 
     #[test]
+    #[should_panic]
+    fn test_initialize_admin_called_twice_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        // Second call must panic
+        client.initialize_admin(&admin);
+    }
+
+    #[test]
     fn test_get_assets_by_owner_updated_after_deregister() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1087,6 +1333,7 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let id = client.register_asset(
@@ -1098,6 +1345,30 @@ mod tests {
         assert_eq!(client.get_assets_by_owner(&owner).len(), 1);
         client.deregister_asset(&id);
         assert_eq!(client.get_assets_by_owner(&owner).len(), 0);
+    }
+
+    #[test]
+    fn test_deregister_allows_reregistration_of_same_metadata() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        let owner = Address::generate(&env);
+        let metadata = String::from_str(&env, "CAT-3516");
+        
+        // Register asset
+        let id1 = client.register_asset(&symbol_short!("GENSET"), &metadata, &owner);
+        
+        // Deregister removes dedup key
+        client.deregister_asset(&id1);
+        
+        // Same owner can now re-register the same metadata
+        let id2 = client.register_asset(&symbol_short!("GENSET"), &metadata, &owner);
+        assert_ne!(id1, id2);
     }
 
     // --- Issue #142: get_admin structured error before initialization ---
@@ -1127,6 +1398,7 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let id = client.register_asset(
@@ -1158,6 +1430,10 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner = Address::generate(&env);
         let new_owner = Address::generate(&env);
         let metadata = String::from_str(&env, "CAT-3516");
@@ -1181,6 +1457,10 @@ mod tests {
         env.mock_all_auths();
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let id = client.register_asset(
@@ -1217,6 +1497,10 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner = Address::generate(&env);
         client.register_asset(&symbol_short!("GENSET"), &String::from_str(&env, "A"), &owner);
 
@@ -1242,6 +1526,7 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let mut batch = Vec::new(&env);
@@ -1274,11 +1559,20 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
 
         let owner = Address::generate(&env);
         let id = client.register_asset(&symbol_short!("GENSET"), &String::from_str(&env, "Base"), &owner);
 
         client.pause(&admin);
+
+        // Read-only access should still work while paused
+        let paused_asset = client.get_asset(&id);
+        assert_eq!(paused_asset.asset_id, id);
+        assert_eq!(paused_asset.owner, owner);
+        assert!(client.asset_exists(&id));
+        assert_eq!(client.get_assets_by_owner(&owner).len(), 1);
+        assert!(client.try_get_asset(&id).is_ok());
 
         // register_asset
         assert_eq!(
@@ -1318,6 +1612,10 @@ mod tests {
         let contract_id = env.register(AssetRegistry, ());
         let client = AssetRegistryClient::new(&env, &contract_id);
 
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
         let owner = Address::generate(&env);
         let mut batch = Vec::new(&env);
         batch.push_back(AssetInput { asset_type: symbol_short!("GENSET"), metadata: String::from_str(&env, "Duplicate") });
@@ -1329,6 +1627,160 @@ mod tests {
             Err(Ok(soroban_sdk::Error::from_contract_error(
                 ContractError::DuplicateAsset as u32,
             ))),
+        );
+    }
+
+    #[test]
+    fn test_asset_type_allowlist() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_contract_id, client, admin) = {
+            let contract_id = env.register(AssetRegistry, ());
+            let client = AssetRegistryClient::new(&env, &contract_id);
+            let admin = Address::generate(&env);
+            client.initialize_admin(&admin);
+            (contract_id, client, admin)
+        };
+
+        let owner = Address::generate(&env);
+        let valid_type = symbol_short!("VALID");
+        let invalid_type = symbol_short!("JUNK");
+
+        // Try registering without allowing first
+        let result = client.try_register_asset(
+            &valid_type,
+            &String::from_str(&env, "Some metadata"),
+            &owner,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidAssetType as u32
+            )))
+        );
+
+        // Allow the type
+        client.add_asset_type(&admin, &valid_type);
+        assert!(client.is_valid_asset_type(&valid_type));
+
+        // Now registration succeeds
+        let id = client.register_asset(
+            &valid_type,
+            &String::from_str(&env, "Some metadata"),
+            &owner,
+        );
+        assert_eq!(id, 1);
+
+        // Still cannot register invalid type
+        let result = client.try_register_asset(
+            &invalid_type,
+            &String::from_str(&env, "Other metadata"),
+            &owner,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidAssetType as u32
+            )))
+        );
+
+        // Remove the type
+        client.remove_asset_type(&admin, &valid_type);
+        assert!(!client.is_valid_asset_type(&valid_type));
+
+        // Registration fails again
+        let result = client.try_register_asset(
+            &valid_type,
+            &String::from_str(&env, "More metadata"),
+            &owner,
+        );
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidAssetType as u32
+            )))
+        );
+    }
+
+    #[test]
+    fn test_batch_register_validates_asset_types() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("VALID"));
+
+        let owner = Address::generate(&env);
+        let mut batch = Vec::new(&env);
+        batch.push_back(AssetInput {
+            asset_type: symbol_short!("VALID"),
+            metadata: String::from_str(&env, "Meta 1"),
+        });
+        batch.push_back(AssetInput {
+            asset_type: symbol_short!("JUNK"),
+            metadata: String::from_str(&env, "Meta 2"),
+        });
+
+        let result = client.try_batch_register_assets(&owner, &batch);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::InvalidAssetType as u32
+            )))
+        );
+    }
+
+    #[test]
+    fn test_non_owner_cannot_deregister_asset() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let owner = Address::generate(&env);
+        let id = client.register_asset(
+            &symbol_short!("GENSET"),
+            &String::from_str(&env, "CAT-3516"),
+            &owner,
+        );
+
+        // Only authorize the owner, not the admin — deregister_asset requires admin auth
+        use soroban_sdk::IntoVal;
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &owner,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "deregister_asset",
+                args: (id,).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        // Auth framework rejects the call because admin.require_auth() is not satisfied
+        assert!(client.try_deregister_asset(&id).is_err());
+        // Asset must still exist
+        assert!(client.asset_exists(&id));
+    }
+
+    #[test]
+    fn test_deregister_nonexistent_asset_returns_structured_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        assert_eq!(
+            client.try_deregister_asset(&9999u64),
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::AssetNotFound as u32
+            )))
         );
     }
 }
