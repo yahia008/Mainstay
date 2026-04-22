@@ -679,7 +679,18 @@ impl Lifecycle {
     ///
     /// # Returns
     /// Vec containing all maintenance records in chronological order
+    ///
+    /// # Panics
+    /// - [`ContractError::AssetNotFound`] if the asset does not exist
     pub fn get_maintenance_history(env: Env, asset_id: u64) -> Vec<MaintenanceRecord> {
+        let asset_registry: Address = env
+            .storage()
+            .instance()
+            .get(&ASSET_REGISTRY)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        let asset_registry_client = asset_registry::AssetRegistryClient::new(&env, &asset_registry);
+        asset_registry_client.get_asset(&asset_id);
+
         env.storage()
             .persistent()
             .get(&history_key(asset_id))
@@ -1250,6 +1261,32 @@ mod tests {
             result,
             Err(Ok(soroban_sdk::Error::from_contract_error(
                 ContractError::NoMaintenanceHistory as u32,
+            ))),
+        );
+    }
+
+    #[test]
+    fn test_get_maintenance_history_valid_asset_no_records() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, asset_registry_client, _, _) = setup(&env, 0);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let history = client.get_maintenance_history(&asset_id);
+        assert_eq!(history.len(), 0);
+    }
+
+    #[test]
+    fn test_get_maintenance_history_nonexistent_asset() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, _) = setup(&env, 0);
+        let result = client.try_get_maintenance_history(&999u64);
+        assert_eq!(
+            result,
+            Err(Ok(soroban_sdk::Error::from_contract_error(
+                ContractError::AssetNotFound as u32,
             ))),
         );
     }
