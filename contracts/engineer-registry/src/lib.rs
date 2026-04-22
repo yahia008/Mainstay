@@ -13,6 +13,7 @@ pub enum ContractError {
     UntrustedIssuer = 6,
     InvalidCredentialHash = 7,
     Paused = 8,
+    PendingAdminAlreadyExists = 9,
 }
 
 #[contracttype]
@@ -24,6 +25,15 @@ pub struct Engineer {
     pub active: bool,
     pub issued_at: u64,
     pub expires_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EngineerStatus {
+    Active = 0,
+    Revoked = 1,
+    Expired = 2,
+    NotFound = 3,
 }
 
 fn engineer_key(addr: &Address) -> (Symbol, Address) {
@@ -44,6 +54,10 @@ fn ensure_not_paused(env: &Env) {
 
 fn admin_key() -> Symbol {
     symbol_short!("ADMIN")
+}
+
+fn pending_admin_key() -> Symbol {
+    symbol_short!("PEND_ADM")
 }
 
 fn trusted_key(issuer: &Address) -> (Symbol, Address) {
@@ -194,6 +208,33 @@ impl EngineerRegistry {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::EngineerNotFound))
     }
 
+    /// Get the status of an engineer's credential.
+    /// Distinguishes between active, revoked, expired, and not found states.
+    ///
+    /// # Arguments
+    /// * `engineer` - The address of the engineer to check
+    ///
+    /// # Returns
+    /// An EngineerStatus enum indicating the credential state
+    pub fn get_engineer_status(env: Env, engineer: Address) -> EngineerStatus {
+        match env
+            .storage()
+            .persistent()
+            .get::<_, Engineer>(&engineer_key(&engineer))
+        {
+            Some(e) => {
+                if !e.active {
+                    EngineerStatus::Revoked
+                } else if env.ledger().timestamp() >= e.expires_at {
+                    EngineerStatus::Expired
+                } else {
+                    EngineerStatus::Active
+                }
+            }
+            None => EngineerStatus::NotFound,
+        }
+    }
+
     /// Initialize the admin address for the contract.
     /// This function should be called once immediately after deployment.
     ///
@@ -220,6 +261,45 @@ impl EngineerRegistry {
     pub fn get_admin(env: Env) -> Address {
         env.storage().instance().get(&admin_key())
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized))
+    }
+
+    /// Propose a new admin address (step 1 of 2-step transfer).
+    /// Only the current admin can propose a new admin.
+    ///
+    /// # Arguments
+    /// * `admin` - The current admin address
+    /// * `new_admin` - The address to propose as the new admin
+    ///
+    /// # Panics
+    /// - [`ContractError::UnauthorizedAdmin`] if caller is not the current admin
+    /// - [`ContractError::PendingAdminAlreadyExists`] if a pending admin already exists
+    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) {
+        admin.require_auth();
+        let stored_admin: Address = Self::get_admin(env.clone());
+        if stored_admin != admin {
+            panic_with_error!(&env, ContractError::UnauthorizedAdmin);
+        }
+        if env.storage().instance().has(&pending_admin_key()) {
+            panic_with_error!(&env, ContractError::PendingAdminAlreadyExists);
+        }
+        env.storage().instance().set(&pending_admin_key(), &new_admin);
+    }
+
+    /// Accept the admin transfer (step 2 of 2-step transfer).
+    /// Only the pending admin can accept and become the new admin.
+    ///
+    /// # Panics
+    /// - [`ContractError::NotInitialized`] if no pending admin exists
+    /// - [`ContractError::UnauthorizedAdmin`] if caller is not the pending admin
+    pub fn accept_admin(env: Env) {
+        let pending_admin: Address = env
+            .storage()
+            .instance()
+            .get(&pending_admin_key())
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        pending_admin.require_auth();
+        env.storage().instance().set(&admin_key(), &pending_admin);
+        env.storage().instance().remove(&pending_admin_key());
     }
 
     /// Admin-only function to pause the contract.
@@ -339,6 +419,7 @@ impl EngineerRegistry {
     }
 
     /// Get all engineer addresses that have been credentialed by a specific issuer.
+    /// This includes both active and revoked engineers (historical registry).
     ///
     /// # Arguments
     /// * `issuer` - The address of the issuer to query
@@ -350,6 +431,37 @@ impl EngineerRegistry {
             .persistent()
             .get(&issuer_engineers_key(&issuer))
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get all active engineer addresses credentialed by a specific issuer.
+    /// Filters out revoked and expired credentials.
+    ///
+    /// # Arguments
+    /// * `issuer` - The address of the issuer to query
+    ///
+    /// # Returns
+    /// A Vec containing only active engineer addresses credentialed by the given issuer
+    pub fn get_active_engineers_by_issuer(env: Env, issuer: Address) -> Vec<Address> {
+        let all_engineers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&issuer_engineers_key(&issuer))
+            .unwrap_or(Vec::new(&env));
+
+        let mut active: Vec<Address> = Vec::new(&env);
+        let now = env.ledger().timestamp();
+        for engineer_addr in all_engineers.iter() {
+            if let Some(engineer) = env
+                .storage()
+                .persistent()
+                .get::<_, Engineer>(&engineer_key(&engineer_addr))
+            {
+                if engineer.active && now < engineer.expires_at {
+                    active.push_back(engineer_addr);
+                }
+            }
+        }
+        active
     }
 
     /// Admin-only function to upgrade the contract WASM to a new hash.
@@ -904,6 +1016,149 @@ mod tests {
         assert_eq!(
             client.try_upgrade(&admin, &BytesN::from_array(&env, &[0u8; 32])),
             Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
+        );
+    }
+
+    #[test]
+    fn test_get_engineer_status_active() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+
+        assert_eq!(client.get_engineer_status(&engineer), EngineerStatus::Active);
+    }
+
+    #[test]
+    fn test_get_engineer_status_revoked() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &31_536_000);
+        client.revoke_credential(&engineer);
+
+        assert_eq!(client.get_engineer_status(&engineer), EngineerStatus::Revoked);
+    }
+
+    #[test]
+    fn test_get_engineer_status_expired() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&engineer, &hash, &issuer, &100); // 100 seconds validity
+        env.ledger().set_timestamp(200); // Move time forward
+
+        assert_eq!(client.get_engineer_status(&engineer), EngineerStatus::Expired);
+    }
+
+    #[test]
+    fn test_get_engineer_status_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin) = setup(&env);
+
+        let engineer = Address::generate(&env);
+        assert_eq!(client.get_engineer_status(&engineer), EngineerStatus::NotFound);
+    }
+
+    #[test]
+    fn test_get_active_engineers_by_issuer_filters_revoked() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let issuer = Address::generate(&env);
+        let eng1 = Address::generate(&env);
+        let eng2 = Address::generate(&env);
+        let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+        client.add_trusted_issuer(&admin, &issuer);
+        client.register_engineer(&eng1, &hash, &issuer, &31_536_000);
+        client.register_engineer(&eng2, &hash, &issuer, &31_536_000);
+
+        // All engineers should be in the full list
+        let all = client.get_engineers_by_issuer(&issuer);
+        assert_eq!(all.len(), 2);
+
+        // All should be active initially
+        let active = client.get_active_engineers_by_issuer(&issuer);
+        assert_eq!(active.len(), 2);
+
+        // Revoke one
+        client.revoke_credential(&eng1);
+
+        // Full list still has both
+        let all = client.get_engineers_by_issuer(&issuer);
+        assert_eq!(all.len(), 2);
+
+        // Active list has only one
+        let active = client.get_active_engineers_by_issuer(&issuer);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active.get(0).unwrap(), eng2);
+    }
+
+    #[test]
+    fn test_propose_and_accept_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin();
+
+        assert_eq!(client.get_admin(), new_admin);
+    }
+
+    #[test]
+    fn test_propose_admin_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let unauthorized = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+
+        assert_eq!(
+            client.try_propose_admin(&unauthorized, &new_admin),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::UnauthorizedAdmin as u32)))
+        );
+    }
+
+    #[test]
+    fn test_accept_admin_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_admin = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+
+        client.propose_admin(&admin, &new_admin);
+
+        // Try to accept as unauthorized address
+        env.mock_all_auths_allowing_non_root_auth();
+        assert_eq!(
+            client.try_accept_admin(),
+            Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::UnauthorizedAdmin as u32)))
         );
     }
 }
