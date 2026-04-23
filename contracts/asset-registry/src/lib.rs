@@ -46,6 +46,8 @@ const ADMIN_KEY: Symbol = symbol_short!("ADMIN");
 const ASSET_TYPE_PREFIX: Symbol = symbol_short!("AST_TYPE");
 const PENDING_ADMIN_KEY: Symbol = symbol_short!("PADMIN");
 pub const DEREG_TOPIC: Symbol = symbol_short!("DEREG_AST");
+pub const ADD_TYPE_TOPIC: Symbol = symbol_short!("ADD_TYPE");
+pub const RM_TYPE_TOPIC: Symbol = symbol_short!("RM_TYPE");
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -709,6 +711,7 @@ impl AssetRegistry {
         env.storage()
             .instance()
             .set(&asset_type_key(&asset_type), &true);
+        env.events().publish((ADD_TYPE_TOPIC,), (asset_type,));
     }
 
     /// Admin-only function to remove an asset type from the allowlist.
@@ -737,6 +740,7 @@ impl AssetRegistry {
         env.storage()
             .instance()
             .remove(&asset_type_key(&asset_type));
+        env.events().publish((RM_TYPE_TOPIC,), (asset_type,));
     }
 
     /// Check if an asset type is valid (exists in the allowlist).
@@ -2233,5 +2237,56 @@ mod tests {
         client.deregister_asset(&owner, &id);
         client.remove_asset_type(&admin, &symbol_short!("GENSET"));
         assert!(!client.is_valid_asset_type(&symbol_short!("GENSET")));
+    }
+
+    #[test]
+    fn test_add_asset_type_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let events = env.events().all();
+        let (_, topics, data): (_, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) =
+            events.last().unwrap();
+        use soroban_sdk::IntoVal;
+        let expected_topic: soroban_sdk::Val =
+            <Symbol as IntoVal<Env, soroban_sdk::Val>>::into_val(&ADD_TYPE_TOPIC, &env);
+        assert_eq!(
+            topics.get(0).unwrap().get_payload(),
+            expected_topic.get_payload()
+        );
+        let (emitted_type,): (Symbol,) = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(emitted_type, symbol_short!("GENSET"));
+    }
+
+    #[test]
+    fn test_remove_asset_type_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+        client.add_asset_type(&admin, &symbol_short!("GENSET"));
+        client.remove_asset_type(&admin, &symbol_short!("GENSET"));
+
+        let events = env.events().all();
+        let (_, topics, data): (_, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) =
+            events.last().unwrap();
+        use soroban_sdk::IntoVal;
+        let expected_topic: soroban_sdk::Val =
+            <Symbol as IntoVal<Env, soroban_sdk::Val>>::into_val(&RM_TYPE_TOPIC, &env);
+        assert_eq!(
+            topics.get(0).unwrap().get_payload(),
+            expected_topic.get_payload()
+        );
+        let (emitted_type,): (Symbol,) = soroban_sdk::FromVal::from_val(&env, &data);
+        assert_eq!(emitted_type, symbol_short!("GENSET"));
     }
 }
