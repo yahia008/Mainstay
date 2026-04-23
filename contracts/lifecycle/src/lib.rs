@@ -154,6 +154,7 @@ fn apply_decay(
     asset_id: u64,
     emit_event: bool,
     update_on_zero_interval: bool,
+    max_history: u32,
 ) -> u32 {
     let current_score: u32 = env
         .storage()
@@ -202,7 +203,7 @@ fn apply_decay(
         .persistent()
         .extend_ttl(&last_update_key(asset_id), 518400, 518400);
 
-    score_history_push(env, asset_id, ScoreEntry { timestamp: current_time, score: new_score }, config.max_history);
+    score_history_push(env, asset_id, ScoreEntry { timestamp: current_time, score: new_score }, max_history);
 
     if emit_event {
         env.events().publish(
@@ -788,7 +789,12 @@ impl Lifecycle {
     /// - [`ContractError::NotInitialized`] if contract has not been initialized
     pub fn decay_score(env: Env, asset_id: u64) -> u32 {
         ensure_not_paused(&env);
-        apply_decay(&env, asset_id, true, true)
+        let config: Config = env
+            .storage()
+            .instance()
+            .get(&CONFIG)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        apply_decay(&env, asset_id, true, true, config.max_history)
     }
 
     /// Get the complete maintenance history for an asset.
@@ -911,7 +917,12 @@ impl Lifecycle {
             .get(&ASSET_REGISTRY)
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         verify_asset_exists(&env, &asset_registry, &asset_id);
-        apply_decay(&env, asset_id, false, false)
+        let config: Config = env
+            .storage()
+            .instance()
+            .get(&CONFIG)
+            .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
+        apply_decay(&env, asset_id, false, false, config.max_history)
     }
 
     /// Returns the full score trend: one (timestamp, score) entry per maintenance event.
@@ -990,7 +1001,7 @@ impl Lifecycle {
             .unwrap_or_else(|| panic_with_error!(&env, ContractError::NotInitialized));
         
         // Use unchecked version since we already verified asset exists
-        apply_decay(&env, asset_id, false, false) >= config.eligibility_threshold
+        apply_decay(&env, asset_id, false, false, config.max_history) >= config.eligibility_threshold
     }
 
     /// Returns the timestamp of the most recent maintenance event, or None if no maintenance has been submitted.
@@ -1688,6 +1699,54 @@ mod tests {
                 ContractError::InvalidConfig as u32,
             ))),
         );
+    }
+
+    #[test]
+    fn test_score_history_bounded_after_max_history_update() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Setup with initial max_history of 10
+        let (client, asset_registry_client, engineer_registry_client, admin) = setup(&env, 10);
+        let asset_id = register_asset(&env, &asset_registry_client);
+        let engineer = register_engineer(&env, &engineer_registry_client);
+
+        // Submit 10 maintenance records to reach max_history
+        for i in 0..10 {
+            client.submit_maintenance(
+                &asset_id,
+                &symbol_short!("OIL_CHG"),
+                &String::from_str(&env, &format!("Maintenance {}", i)),
+                &engineer,
+            );
+            env.ledger().set_timestamp(env.ledger().timestamp() + 1000);
+        }
+
+        // Verify score history has 10 entries
+        let history = client.get_score_history(&asset_id);
+        assert_eq!(history.len(), 10u32);
+
+        // Update max_history to 5 - from now on, history should be capped at 5
+        client.update_max_history(&admin, &5);
+
+        // Submit one more maintenance record - this should trigger pruning via apply_decay
+        // when score_history_push is called during decay
+        client.submit_maintenance(
+            &asset_id,
+            &symbol_short!("OIL_CHG"),
+            &String::from_str(&env, "Maintenance 11"),
+            &engineer,
+        );
+        env.ledger().set_timestamp(env.ledger().timestamp() + 1000);
+
+        // Call decay_score which will use the new max_history value
+        client.decay_score(&asset_id);
+
+        // Verify score history is now bounded to the new max_history (5)
+        let history_after = client.get_score_history(&asset_id);
+        assert!(history_after.len() <= 5u32, 
+                "Score history {} should be <= 5 after max_history update", 
+                history_after.len());
     }
 
     #[test]
