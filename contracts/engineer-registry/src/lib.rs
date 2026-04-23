@@ -853,6 +853,22 @@ mod tests {
     }
 
     #[test]
+    fn test_pending_admin_key_cleared_after_accept() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin) = setup(&env);
+
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin();
+
+        let contract_id = client.address.clone();
+        env.as_contract(&contract_id, || {
+            assert!(!env.storage().instance().has(&pending_admin_key()));
+        });
+    }
+
+    #[test]
     fn test_non_admin_cannot_propose_admin() {
         let env = Env::default();
         env.mock_all_auths();

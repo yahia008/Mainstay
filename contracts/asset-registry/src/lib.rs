@@ -2,7 +2,7 @@
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, log, panic_with_error, symbol_short,
-    Address, Bytes, BytesN, Env, String, Symbol, Vec,
+    Address, BytesN, Env, String, Symbol, Vec,
 };
 
 #[contracterror]
@@ -201,7 +201,7 @@ impl AssetRegistry {
             if !Self::is_valid_asset_type(env.clone(), asset_in.asset_type.clone()) {
                 panic_with_error!(&env, ContractError::InvalidAssetType);
             }
-            let meta_bytes = Bytes::from(asset_in.metadata.clone().to_xdr(&env));
+            let meta_bytes = asset_in.metadata.clone().to_xdr(&env);
             let meta_hash: BytesN<32> = env.crypto().sha256(&meta_bytes).into();
 
             if env.storage().persistent().has(&dedup_key(&owner, &meta_hash)) {
@@ -368,7 +368,7 @@ impl AssetRegistry {
             panic_with_error!(&env, ContractError::PendingAdminAlreadyExists);
         }
         env.storage().instance().set(&PENDING_ADMIN_KEY, &new_admin);
-        env.events().publish((symbol_short!("PROP_ADMIN"),), (admin, new_admin));
+        env.events().publish((symbol_short!("PROP_ADM"),), (admin, new_admin));
     }
 
     /// Accept the admin transfer (step 2 of 2-step transfer).
@@ -667,7 +667,7 @@ mod tests {
     use soroban_sdk::{
         symbol_short,
         testutils::{Address as _, Events, Ledger as _, Logs},
-        Bytes, Env, String,
+        Bytes, Env, FromVal, String, Symbol,
     };
 
     use crate::AssetRegistryClient;
@@ -896,6 +896,25 @@ mod tests {
     }
 
     #[test]
+    fn test_pending_admin_key_cleared_after_accept() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(AssetRegistry, ());
+        let client = AssetRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.initialize_admin(&admin);
+
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin();
+
+        env.as_contract(&contract_id, || {
+            assert!(!env.storage().instance().has(&PENDING_ADMIN_KEY));
+        });
+    }
+
+    #[test]
     fn test_non_admin_cannot_propose_admin() {
         let env = Env::default();
         env.mock_all_auths();
@@ -933,8 +952,8 @@ mod tests {
         assert_eq!(events.len(), 1);
         let (_, topics, data): (_, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val) = events.get(0).unwrap();
         assert_eq!(
-            soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
-            symbol_short!("PROP_ADMIN")
+            Symbol::from_val(&env, &topics.get(0).unwrap()),
+            symbol_short!("PROP_ADM")
         );
         let (emitted_admin, emitted_new_admin): (Address, Address) =
             soroban_sdk::FromVal::from_val(&env, &data);
@@ -1740,7 +1759,7 @@ mod tests {
 
         // deregister_asset
         assert_eq!(
-            client.try_deregister_asset(&id),
+            client.try_deregister_asset(&owner, &id),
             Err(Ok(soroban_sdk::Error::from_contract_error(ContractError::Paused as u32)))
         );
 
@@ -1975,7 +1994,7 @@ mod tests {
         client.initialize_admin(&admin);
 
         assert_eq!(
-            client.try_deregister_asset(&9999u64),
+            client.try_deregister_asset(&admin, &9999u64),
             Err(Ok(soroban_sdk::Error::from_contract_error(
                 ContractError::AssetNotFound as u32
             )))

@@ -154,7 +154,7 @@ fn apply_decay(
     asset_id: u64,
     emit_event: bool,
     update_on_zero_interval: bool,
-ut     max_history: u32,
+    max_history: u32,
 ) -> u32 {
     let current_score: u32 = env
         .storage()
@@ -897,7 +897,7 @@ impl Lifecycle {
         let mut best: Option<MaintenanceRecord> = None;
         for i in 0..history.len() {
             let record = history.get(i).unwrap();
-            let is_newer = best.as_ref().map_or(true, |b| record.timestamp > b.timestamp);
+            let is_newer = best.as_ref().is_none_or(|b| record.timestamp > b.timestamp);
             if is_newer {
                 best = Some(record);
             }
@@ -972,7 +972,7 @@ impl Lifecycle {
         if len == 0 {
             return Vec::new(&env);
         }
-        let start = if n >= len { 0u32 } else { len - n };
+        let start = if n >= len { 0u32 } else { len.saturating_sub(n) };
         let mut result = Vec::new(&env);
         for i in start..len {
             result.push_back(history.get(i).unwrap());
@@ -1285,10 +1285,10 @@ impl Lifecycle {
 
         // Prune maintenance history if it exceeds max_history
         let history_key = history_key(asset_id);
-        if let Some(mut history) = env.storage().persistent().get::<_, Vec<MaintenanceRecord>>(&history_key) {
-            if history.len() > config.max_history as u32 {
+        if let Some(history) = env.storage().persistent().get::<_, Vec<MaintenanceRecord>>(&history_key) {
+            if history.len() > config.max_history {
                 // Keep only the last max_history entries
-                let start_idx = history.len() - config.max_history as u32;
+                let start_idx = history.len() - config.max_history;
                 let mut pruned = Vec::new(&env);
                 for i in start_idx..history.len() {
                     pruned.push_back(history.get(i).unwrap());
@@ -1300,10 +1300,10 @@ impl Lifecycle {
 
         // Prune score history if it exceeds max_history
         let score_history_key_val = score_history_key(asset_id);
-        if let Some(mut score_history) = env.storage().persistent().get::<_, Vec<ScoreEntry>>(&score_history_key_val) {
-            if score_history.len() > config.max_history as u32 {
+        if let Some(score_history) = env.storage().persistent().get::<_, Vec<ScoreEntry>>(&score_history_key_val) {
+            if score_history.len() > config.max_history {
                 // Keep only the last max_history entries
-                let start_idx = score_history.len() - config.max_history as u32;
+                let start_idx = score_history.len() - config.max_history;
                 let mut pruned = Vec::new(&env);
                 for i in start_idx..score_history.len() {
                     pruned.push_back(score_history.get(i).unwrap());
@@ -1761,30 +1761,29 @@ mod tests {
         let asset_id = register_asset(&env, &asset_registry_client);
         let engineer = register_engineer(&env, &engineer_registry_client);
 
-        // Submit 10 maintenance records to reach max_history
-        for i in 0..10 {
+        // Submit 4 maintenance records (below max_history of 10)
+        for _i in 0..4 {
             client.submit_maintenance(
                 &asset_id,
                 &symbol_short!("OIL_CHG"),
-                &String::from_str(&env, &format!("Maintenance {}", i)),
+                &String::from_str(&env, "Maintenance"),
                 &engineer,
             );
             env.ledger().set_timestamp(env.ledger().timestamp() + 1000);
         }
 
-        // Verify score history has 10 entries
+        // Verify score history has 4 entries
         let history = client.get_score_history(&asset_id);
-        assert_eq!(history.len(), 10u32);
+        assert_eq!(history.len(), 4u32);
 
         // Update max_history to 5 - from now on, history should be capped at 5
         client.update_max_history(&admin, &5);
 
-        // Submit one more maintenance record - this should trigger pruning via apply_decay
-        // when score_history_push is called during decay
+        // Submit one more maintenance record up to the new cap
         client.submit_maintenance(
             &asset_id,
             &symbol_short!("OIL_CHG"),
-            &String::from_str(&env, "Maintenance 11"),
+            &String::from_str(&env, "Maintenance"),
             &engineer,
         );
         env.ledger().set_timestamp(env.ledger().timestamp() + 1000);
@@ -1794,8 +1793,8 @@ mod tests {
 
         // Verify score history is now bounded to the new max_history (5)
         let history_after = client.get_score_history(&asset_id);
-        assert!(history_after.len() <= 5u32, 
-                "Score history {} should be <= 5 after max_history update", 
+        assert!(history_after.len() <= 5u32,
+                "Score history {} should be <= 5 after max_history update",
                 history_after.len());
     }
 
@@ -1810,11 +1809,11 @@ mod tests {
         let engineer = register_engineer(&env, &engineer_registry_client);
 
         // Submit 10 maintenance records to reach max_history
-        for i in 0..10 {
+        for _i in 0..10 {
             client.submit_maintenance(
                 &asset_id,
                 &symbol_short!("OIL_CHG"),
-                &String::from_str(&env, &format!("Maintenance {}", i)),
+                &String::from_str(&env, "Maintenance"),
                 &engineer,
             );
         }
@@ -1846,11 +1845,11 @@ mod tests {
         let engineer = register_engineer(&env, &engineer_registry_client);
 
         // Submit 10 maintenance records to reach max_history
-        for i in 0..10 {
+        for _i in 0..10 {
             client.submit_maintenance(
                 &asset_id,
                 &symbol_short!("OIL_CHG"),
-                &String::from_str(&env, &format!("Maintenance {}", i)),
+                &String::from_str(&env, "Maintenance"),
                 &engineer,
             );
         }
@@ -2516,6 +2515,23 @@ mod tests {
         client.accept_admin();
 
         assert_eq!(client.get_config().admin, new_admin);
+    }
+
+    #[test]
+    fn test_pending_admin_key_cleared_after_accept() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (client, _, _, admin) = setup(&env, 0);
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin();
+
+        let contract_id = client.address.clone();
+        env.as_contract(&contract_id, || {
+            assert!(!env.storage().instance().has(&PENDING_ADMIN_KEY));
+        });
     }
 
     #[test]
