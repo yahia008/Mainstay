@@ -1,9 +1,6 @@
-# TODO: Fix #317 - renew_credential minimum validity period
+# TODO: Fix #318 - register_engineer allows validity_period of 0
 
-- [x] Read and understand contract code and tests
-- [x] Add `InvalidValidityPeriod = 13` to `ContractError` enum
-- [x] Add `MIN_VALIDITY_PERIOD: u64 = 86_400` constant
-- [x] Add guard in `renew_credential` rejecting `new_validity_period < MIN_VALIDITY_PERIOD`
-- [x] Add test `test_renew_credential_short_validity_rejected`
-- [ ] Run `cargo test` to verify all tests pass
+- [x] Add `validity_period == 0` guard in `register_engineer`
+- [x] Add test `test_register_engineer_zero_validity_rejected`
+- [ ] Run `cargo test -p engineer-registry` to verify all tests pass
 
